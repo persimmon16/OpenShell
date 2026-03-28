@@ -1160,23 +1160,17 @@ impl DockerRuntime {
     }
 
     pub async fn check_existing(&self, name: &str) -> Result<Option<ExistingGateway>> {
-        check_existing_gateway(&self.docker, name)
-            .await
-            .map(|opt| {
-                opt.map(|info| ExistingGateway {
-                    container_exists: info.container_exists,
-                    container_running: info.container_running,
-                    storage_exists: info.volume_exists,
-                    container_image: info.container_image,
-                })
+        check_existing_gateway(&self.docker, name).await.map(|opt| {
+            opt.map(|info| ExistingGateway {
+                container_exists: info.container_exists,
+                container_running: info.container_running,
+                storage_exists: info.volume_exists,
+                container_image: info.container_image,
             })
+        })
     }
 
-    pub async fn create_gateway(
-        &self,
-        name: &str,
-        config: &GatewayContainerConfig,
-    ) -> Result<()> {
+    pub async fn create_gateway(&self, name: &str, config: &GatewayContainerConfig) -> Result<()> {
         ensure_container(
             &self.docker,
             name,
@@ -1284,8 +1278,7 @@ impl DockerRuntime {
         on_log: &mut (dyn FnMut(String) + Send),
     ) -> Result<()> {
         let container = container_name(name);
-        crate::push::push_local_images(&self.docker, &self.docker, &container, images, on_log)
-            .await
+        crate::push::push_local_images(&self.docker, &self.docker, &container, images, on_log).await
     }
 
     pub async fn check_port_conflicts(

@@ -438,16 +438,11 @@ fn diagnose_apple_container_not_running(_gateway_name: &str) -> GatewayFailureDi
             OpenShell on macOS uses Apple Container for lightweight VM-based sandboxes."
             .to_string(),
         recovery_steps: vec![
-            RecoveryStep::with_command(
-                "Start Apple Container",
-                "container system start",
-            ),
+            RecoveryStep::with_command("Start Apple Container", "container system start"),
             RecoveryStep::new(
                 "If not installed, install Apple Container from https://github.com/apple/container",
             ),
-            RecoveryStep::new(
-                "Requires macOS 15 (Sequoia) or later",
-            ),
+            RecoveryStep::new("Requires macOS 15 (Sequoia) or later"),
             RecoveryStep::new("Then retry: openshell gateway start"),
         ],
         retryable: true,

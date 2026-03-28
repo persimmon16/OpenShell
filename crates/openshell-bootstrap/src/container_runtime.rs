@@ -116,7 +116,10 @@ impl RuntimeBackend {
         registry_token: Option<&str>,
     ) -> Result<()> {
         match self {
-            Self::Docker(r) => r.ensure_image(image_ref, registry_username, registry_token).await,
+            Self::Docker(r) => {
+                r.ensure_image(image_ref, registry_username, registry_token)
+                    .await
+            }
             #[cfg(target_os = "macos")]
             Self::AppleContainer(r) => {
                 r.ensure_image(image_ref, registry_username, registry_token)
@@ -153,11 +156,7 @@ impl RuntimeBackend {
         }
     }
 
-    pub async fn create_gateway(
-        &self,
-        name: &str,
-        config: &GatewayContainerConfig,
-    ) -> Result<()> {
+    pub async fn create_gateway(&self, name: &str, config: &GatewayContainerConfig) -> Result<()> {
         match self {
             Self::Docker(r) => r.create_gateway(name, config).await,
             #[cfg(target_os = "macos")]
@@ -260,11 +259,7 @@ impl RuntimeBackend {
         }
     }
 
-    pub async fn check_port_conflicts(
-        &self,
-        name: &str,
-        port: u16,
-    ) -> Result<Vec<PortConflict>> {
+    pub async fn check_port_conflicts(&self, name: &str, port: u16) -> Result<Vec<PortConflict>> {
         match self {
             Self::Docker(r) => r.check_port_conflicts(name, port).await,
             #[cfg(target_os = "macos")]
@@ -283,9 +278,7 @@ impl RuntimeBackend {
         match self {
             Self::Docker(r) => r.build_image(dockerfile, tag, context, args, on_log).await,
             #[cfg(target_os = "macos")]
-            Self::AppleContainer(r) => {
-                r.build_image(dockerfile, tag, context, args, on_log).await
-            }
+            Self::AppleContainer(r) => r.build_image(dockerfile, tag, context, args, on_log).await,
         }
     }
 
@@ -330,13 +323,18 @@ impl RuntimeBackend {
 }
 
 /// Detect whether Apple Container is available on this system.
+///
+/// Runs `container system status` and checks for a "running" status.
 #[cfg(target_os = "macos")]
 pub fn apple_container_available() -> bool {
-    std::process::Command::new("container")
-        .args(["system", "info"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    let output = std::process::Command::new("container")
+        .args(["system", "status"])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            stdout.contains("running")
+        }
+        _ => false,
+    }
 }

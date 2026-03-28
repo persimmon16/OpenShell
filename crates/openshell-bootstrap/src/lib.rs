@@ -44,7 +44,7 @@ use crate::runtime::{
 };
 
 pub use crate::constants::container_name;
-pub use crate::container_runtime::{ExistingGateway, PortConflict, RuntimePreflight};
+pub use crate::container_runtime::{ExistingGateway, PortConflict, RuntimePreflight, RuntimeType};
 pub use crate::docker::{
     DockerPreflight, ExistingGatewayInfo, check_docker_available, create_ssh_docker_client,
 };
@@ -70,9 +70,7 @@ pub async fn create_runtime(remote: Option<&RemoteOptions>) -> Result<RuntimeBac
         use container_runtime::apple_container_available;
         use runtime_apple::AppleContainerRuntime;
         if apple_container_available() {
-            return Ok(RuntimeBackend::AppleContainer(
-                AppleContainerRuntime::new(),
-            ));
+            return Ok(RuntimeBackend::AppleContainer(AppleContainerRuntime::new()));
         }
     }
 
@@ -442,8 +440,7 @@ where
             }
 
             let workload_existed_before_pki = openshell_workload_exists(docker, &name).await?;
-            let (pki_bundle, rotated) =
-                reconcile_pki(docker, &name, &extra_sans, &log).await?;
+            let (pki_bundle, rotated) = reconcile_pki(docker, &name, &extra_sans, &log).await?;
 
             if rotated && workload_existed_before_pki {
                 restart_openshell_deployment(docker, &name).await?;
@@ -462,8 +459,7 @@ where
                     .collect();
                 if !images.is_empty() {
                     log("[status] Deploying components".to_string());
-                    let local_docker =
-                        Docker::connect_with_local_defaults().into_diagnostic()?;
+                    let local_docker = Docker::connect_with_local_defaults().into_diagnostic()?;
                     let container = container_name(&name);
                     let on_log_ref = Arc::clone(&on_log);
                     let mut push_log = move |msg: String| {
@@ -496,21 +492,12 @@ where
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
                 let pki_dir = format!("{home}/.openshell/gateways/{name}/pki");
                 std::fs::create_dir_all(&pki_dir).into_diagnostic()?;
-                std::fs::write(
-                    format!("{pki_dir}/ca.crt"),
-                    &pki_bundle.ca_cert_pem,
-                )
-                .into_diagnostic()?;
-                std::fs::write(
-                    format!("{pki_dir}/tls.crt"),
-                    &pki_bundle.server_cert_pem,
-                )
-                .into_diagnostic()?;
-                std::fs::write(
-                    format!("{pki_dir}/tls.key"),
-                    &pki_bundle.server_key_pem,
-                )
-                .into_diagnostic()?;
+                std::fs::write(format!("{pki_dir}/ca.crt"), &pki_bundle.ca_cert_pem)
+                    .into_diagnostic()?;
+                std::fs::write(format!("{pki_dir}/tls.crt"), &pki_bundle.server_cert_pem)
+                    .into_diagnostic()?;
+                std::fs::write(format!("{pki_dir}/tls.key"), &pki_bundle.server_key_pem)
+                    .into_diagnostic()?;
             }
         }
 
@@ -522,9 +509,7 @@ where
                     f(msg);
                 }
             };
-            runtime
-                .wait_for_ready(&name, &mut gateway_log)
-                .await?;
+            runtime.wait_for_ready(&name, &mut gateway_log).await?;
         }
 
         // Create and store gateway metadata.
@@ -630,9 +615,7 @@ pub async fn gateway_container_logs<W: std::io::Write>(
     // This avoids requiring Send on the writer while still using the runtime.
     let runtime = create_runtime(remote).await?;
     let mut buf = Vec::new();
-    runtime
-        .stream_logs(name, follow, lines, &mut buf)
-        .await?;
+    runtime.stream_logs(name, follow, lines, &mut buf).await?;
     writer
         .write_all(&buf)
         .into_diagnostic()

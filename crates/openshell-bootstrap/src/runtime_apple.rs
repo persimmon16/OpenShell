@@ -28,12 +28,13 @@ impl AppleContainerRuntime {
     }
 
     pub async fn check_available(&self) -> Result<RuntimePreflight> {
+        // Apple Container v0.10.0 uses `container system status` (not `system info`).
         let output = tokio::process::Command::new("container")
-            .args(["system", "info"])
+            .args(["system", "status"])
             .output()
             .await
             .into_diagnostic()
-            .wrap_err("failed to run `container system info`")?;
+            .wrap_err("failed to run `container system status`")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -43,16 +44,36 @@ impl AppleContainerRuntime {
             ));
         }
 
-        // Parse version from the JSON output.
+        // Parse the table-format output. Look for "status  running".
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let version = serde_json::from_str::<serde_json::Value>(&stdout)
-            .ok()
-            .and_then(|v| v.get("version")?.as_str().map(String::from));
+        if !stdout.contains("running") {
+            return Err(miette::miette!(
+                "Apple Container service is not running.\n\
+                 Run `container system start` to start it."
+            ));
+        }
+
+        // Get version from `container system version`.
+        let version = self.get_version().await;
 
         Ok(RuntimePreflight {
             version,
             runtime_type: RuntimeType::AppleContainer,
         })
+    }
+
+    async fn get_version(&self) -> Option<String> {
+        let output = tokio::process::Command::new("container")
+            .args(["--version"])
+            .output()
+            .await
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Output: "container CLI version 0.10.0 (build: release, commit: ...)"
+        stdout
+            .strip_prefix("container CLI version ")
+            .and_then(|s| s.split_whitespace().next())
+            .map(String::from)
     }
 
     pub async fn ensure_image(
@@ -61,7 +82,7 @@ impl AppleContainerRuntime {
         _registry_username: Option<&str>,
         _registry_token: Option<&str>,
     ) -> Result<()> {
-        // Check if image exists locally.
+        // Check if image exists locally via JSON list.
         let check = tokio::process::Command::new("container")
             .args(["image", "list", "--format", "json"])
             .output()
@@ -70,8 +91,15 @@ impl AppleContainerRuntime {
 
         if check.status.success() {
             let stdout = String::from_utf8_lossy(&check.stdout);
-            if stdout.contains(image_ref) {
-                return Ok(());
+            // Parse JSON array and check `reference` field.
+            if let Ok(images) = serde_json::from_str::<Vec<serde_json::Value>>(&stdout) {
+                for img in &images {
+                    if let Some(reference) = img.get("reference").and_then(|r| r.as_str()) {
+                        if reference == image_ref {
+                            return Ok(());
+                        }
+                    }
+                }
             }
         }
 
@@ -109,8 +137,14 @@ impl AppleContainerRuntime {
 
     pub async fn check_existing(&self, name: &str) -> Result<Option<ExistingGateway>> {
         let container_name = format!("openshell-gateway-{name}");
+
+        // Apple Container v0.10.0: `container list --all --format json`
+        // Returns JSON array where each entry has:
+        //   configuration.id  — the container name (set via --name at create time)
+        //   status            — "running", "stopped", etc.
+        //   configuration.image.reference — the image ref
         let output = tokio::process::Command::new("container")
-            .args(["list", "--format", "json"])
+            .args(["list", "--all", "--format", "json"])
             .output()
             .await
             .into_diagnostic()?;
@@ -120,24 +154,17 @@ impl AppleContainerRuntime {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        if !stdout.contains(&container_name) {
-            return Ok(None);
-        }
+        let containers: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap_or_default();
 
-        // Parse container state from JSON output.
-        let containers: Vec<serde_json::Value> =
-            serde_json::from_str(&stdout).unwrap_or_default();
         for c in &containers {
-            if c.get("name")
-                .and_then(|n| n.as_str())
-                .is_some_and(|n| n == container_name)
-            {
+            let id = c.pointer("/configuration/id").and_then(|v| v.as_str());
+            if id == Some(&container_name) {
                 let running = c
-                    .get("state")
+                    .get("status")
                     .and_then(|s| s.as_str())
                     .is_some_and(|s| s == "running");
                 let image = c
-                    .get("image")
+                    .pointer("/configuration/image/reference")
                     .and_then(|i| i.as_str())
                     .map(String::from);
                 return Ok(Some(ExistingGateway {
@@ -152,11 +179,7 @@ impl AppleContainerRuntime {
         Ok(None)
     }
 
-    pub async fn create_gateway(
-        &self,
-        name: &str,
-        config: &GatewayContainerConfig,
-    ) -> Result<()> {
+    pub async fn create_gateway(&self, name: &str, config: &GatewayContainerConfig) -> Result<()> {
         let container_name = format!("openshell-gateway-{name}");
         let data_dir = self.data_dir(name);
         let pki_dir = self.pki_dir(name);
@@ -169,12 +192,13 @@ impl AppleContainerRuntime {
             "create".to_string(),
             "--name".to_string(),
             container_name,
+            "-d".to_string(), // detach
             "-p".to_string(),
-            format!("{}:8080", config.gateway_port),
-            "--volume".to_string(),
-            format!("{}:/etc/openshell-tls", pki_dir),
-            "--volume".to_string(),
-            format!("{}:/var/openshell", data_dir),
+            format!("127.0.0.1:{}:8080", config.gateway_port),
+            "-v".to_string(),
+            format!("{pki_dir}:/etc/openshell-tls"),
+            "-v".to_string(),
+            format!("{data_dir}:/var/openshell"),
         ];
 
         // Environment variables.
@@ -238,7 +262,7 @@ impl AppleContainerRuntime {
             .output()
             .await;
         let _ = tokio::process::Command::new("container")
-            .args(["rm", &container_name])
+            .args(["delete", &container_name])
             .output()
             .await;
 
@@ -292,11 +316,8 @@ impl AppleContainerRuntime {
         name: &str,
         mut on_log: impl FnMut(String) + Send,
     ) -> Result<()> {
-        // Poll the gRPC health endpoint on the published port.
-        let metadata =
-            crate::metadata::get_gateway_metadata(name).unwrap_or_else(|| {
-                crate::metadata::create_gateway_metadata(name, None, 8080)
-            });
+        let metadata = crate::metadata::get_gateway_metadata(name)
+            .unwrap_or_else(|| crate::metadata::create_gateway_metadata(name, None, 8080));
 
         let endpoint = &metadata.gateway_endpoint;
         let attempts = 90; // 3 minutes at 2s intervals
@@ -308,7 +329,6 @@ impl AppleContainerRuntime {
                 ));
             }
 
-            // Simple TCP probe on the gateway port.
             let port = metadata.gateway_port;
             match tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await {
                 Ok(_) => {
@@ -328,8 +348,9 @@ impl AppleContainerRuntime {
 
     pub async fn fetch_recent_logs(&self, name: &str, n: usize) -> String {
         let container_name = format!("openshell-gateway-{name}");
+        // Apple Container v0.10.0 uses `-n` not `--tail`.
         let output = tokio::process::Command::new("container")
-            .args(["logs", "--tail", &n.to_string(), &container_name])
+            .args(["logs", "-n", &n.to_string(), &container_name])
             .output()
             .await;
 
@@ -360,7 +381,8 @@ impl AppleContainerRuntime {
             args.push("-f".to_string());
         }
         if let Some(n) = lines {
-            args.push("--tail".to_string());
+            // Apple Container v0.10.0 uses `-n` not `--tail`.
+            args.push("-n".to_string());
             args.push(n.to_string());
         }
         args.push(container_name);
@@ -394,12 +416,7 @@ impl AppleContainerRuntime {
         Ok(())
     }
 
-    pub async fn check_port_conflicts(
-        &self,
-        _name: &str,
-        port: u16,
-    ) -> Result<Vec<PortConflict>> {
-        // Check if the port is already in use via lsof.
+    pub async fn check_port_conflicts(&self, _name: &str, port: u16) -> Result<Vec<PortConflict>> {
         let output = tokio::process::Command::new("lsof")
             .args(["-i", &format!(":{port}"), "-sTCP:LISTEN", "-t"])
             .output()
@@ -497,10 +514,8 @@ impl AppleContainerRuntime {
 
     fn build_env_vars(&self, config: &GatewayContainerConfig) -> Vec<String> {
         let mut env = vec![
-            format!("OPENSHELL_SANDBOX_BACKEND=apple_container"),
-            format!(
-                "CONTAINER_BRIDGE_ENDPOINT=host.containers.internal:50052"
-            ),
+            "OPENSHELL_SANDBOX_BACKEND=apple-container".to_string(),
+            "OPENSHELL_BRIDGE_ENDPOINT=https://host.containers.internal:50052".to_string(),
         ];
 
         if config.disable_tls {
@@ -510,7 +525,7 @@ impl AppleContainerRuntime {
             env.push("OPENSHELL_DISABLE_GATEWAY_AUTH=true".to_string());
         }
         if let Some(ref host) = config.ssh_gateway_host {
-            env.push(format!("SSH_GATEWAY_HOST={host}"));
+            env.push(format!("OPENSHELL_SSH_GATEWAY_HOST={host}"));
         }
 
         env
