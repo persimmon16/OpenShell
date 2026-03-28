@@ -4,15 +4,15 @@
 
 `openshell-server` is the gateway -- the central control plane for a cluster. It exposes two gRPC services (OpenShell and Inference) and HTTP endpoints on a single multiplexed port, manages sandbox lifecycle, persists state in SQLite or Postgres, and provides SSH tunneling into sandboxes. The gateway coordinates all interactions between clients, the sandbox backend, and the persistence layer.
 
-### Dual-Backend Sandbox Management
+### Sandbox Backends
 
 The gateway supports two sandbox backends:
 
-- **Kubernetes (Docker + k3s)**: Used on Linux and for remote deployments. Sandboxes are Kubernetes pods managed via the kube-rs client. The gateway runs inside a Docker container with an embedded k3s cluster.
+- **Kubernetes** (Linux/remote): Sandboxes are Kubernetes pods managed via the kube-rs client. The gateway runs inside a Docker container with an embedded k3s cluster.
 
-- **Apple Container (macOS)**: Used for local macOS development. Sandboxes are lightweight VMs managed via a Swift bridge daemon that translates gRPC calls to Apple Container XPC. The gateway runs inside an Apple Container VM, no Kubernetes involved.
+- **Apple Container** (macOS): Sandboxes are lightweight VMs managed via a Swift bridge daemon that translates gRPC calls to Apple Container XPC. The gateway connects to the bridge daemon over mutual TLS using the OpenShell PKI. No Kubernetes is involved. See [Gateway Security](gateway-security.md#bridge-daemon-authentication-apple-container-backend) for the authentication details.
 
-The backend is selected automatically at gateway startup based on the platform and available runtimes. The `runtime_type` field in `GatewayMetadata` records which backend was used so subsequent operations (stop, destroy, logs) dispatch correctly.
+The backend is selected automatically at gateway startup based on the platform and available runtimes. On macOS, Apple Container is preferred when available. The `runtime_type` field in `GatewayMetadata` records which backend was used so subsequent operations (stop, destroy, logs) dispatch correctly. The `sandbox_backend`, `bridge_endpoint`, and `bridge_tls` configuration fields control the server-side sandbox management.
 
 ## Architecture Diagram
 

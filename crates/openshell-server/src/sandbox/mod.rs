@@ -1,7 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Kubernetes sandbox integration.
+//! Sandbox backend integration.
+//!
+//! Supports two backends:
+//! - **Kubernetes** (default): manages sandboxes as Kubernetes pods via kube-rs.
+//! - **Apple Container** (macOS): manages sandboxes via the container bridge
+//!   daemon, authenticated with mutual TLS.
+
+pub mod bridge_client;
 
 use crate::persistence::{ObjectId, ObjectName, ObjectType, Store};
 use futures::{StreamExt, TryStreamExt};

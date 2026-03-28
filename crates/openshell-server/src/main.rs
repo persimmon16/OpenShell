@@ -108,6 +108,27 @@ struct Args {
     /// certificate. Ignored when --disable-tls is set.
     #[arg(long, env = "OPENSHELL_DISABLE_GATEWAY_AUTH")]
     disable_gateway_auth: bool,
+
+    /// Sandbox backend: "kubernetes" (default) or "apple-container".
+    #[arg(long, env = "OPENSHELL_SANDBOX_BACKEND", default_value = "kubernetes")]
+    sandbox_backend: String,
+
+    /// Container bridge daemon endpoint (required for apple-container backend).
+    /// The gateway connects to this endpoint over mutual TLS.
+    #[arg(long, env = "OPENSHELL_BRIDGE_ENDPOINT")]
+    bridge_endpoint: Option<String>,
+
+    /// Path to CA certificate for verifying the bridge daemon's TLS certificate.
+    #[arg(long, env = "OPENSHELL_BRIDGE_TLS_CA")]
+    bridge_tls_ca: Option<PathBuf>,
+
+    /// Path to client certificate for authenticating to the bridge daemon.
+    #[arg(long, env = "OPENSHELL_BRIDGE_TLS_CERT")]
+    bridge_tls_cert: Option<PathBuf>,
+
+    /// Path to client private key for authenticating to the bridge daemon.
+    #[arg(long, env = "OPENSHELL_BRIDGE_TLS_KEY")]
+    bridge_tls_key: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -186,6 +207,25 @@ async fn main() -> Result<()> {
 
     if let Some(ip) = args.host_gateway_ip {
         config = config.with_host_gateway_ip(ip);
+    }
+
+    config = config.with_sandbox_backend(&args.sandbox_backend);
+
+    if let Some(endpoint) = args.bridge_endpoint {
+        config = config.with_bridge_endpoint(endpoint);
+    }
+
+    // Build bridge TLS config when all three paths are provided.
+    if let (Some(ca), Some(cert), Some(key)) = (
+        args.bridge_tls_ca,
+        args.bridge_tls_cert,
+        args.bridge_tls_key,
+    ) {
+        config = config.with_bridge_tls(openshell_core::BridgeTlsConfig {
+            ca_path: ca,
+            cert_path: cert,
+            key_path: key,
+        });
     }
 
     if args.disable_tls {

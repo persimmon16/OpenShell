@@ -17,7 +17,7 @@ pub mod paths;
 pub mod proto;
 pub mod settings;
 
-pub use config::{Config, TlsConfig};
+pub use config::{BridgeTlsConfig, Config, TlsConfig};
 pub use error::{Error, Result};
 
 /// Build version string derived from git metadata.

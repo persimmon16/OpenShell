@@ -15,6 +15,11 @@ pub struct PkiBundle {
     pub server_key_pem: String,
     pub client_cert_pem: String,
     pub client_key_pem: String,
+    /// TLS certificate for the container bridge daemon (macOS Apple Container).
+    /// The gateway authenticates the bridge using this cert (verified against the CA).
+    pub bridge_cert_pem: String,
+    /// Private key for the bridge daemon's TLS certificate.
+    pub bridge_key_pem: String,
 }
 
 /// Default SANs always included on the server certificate.
@@ -26,6 +31,12 @@ const DEFAULT_SERVER_SANS: &[&str] = &[
     "host.docker.internal",
     "127.0.0.1",
 ];
+
+/// SANs for the container bridge daemon certificate (macOS host).
+///
+/// `host.containers.internal` is the hostname Apple Container VMs use to reach
+/// the host, analogous to Docker's `host.docker.internal`.
+const BRIDGE_SERVER_SANS: &[&str] = &["host.containers.internal", "localhost", "127.0.0.1"];
 
 /// Generate a complete PKI bundle: CA, server cert, and client cert.
 ///
@@ -90,6 +101,24 @@ pub fn generate_pki(extra_sans: &[String]) -> Result<PkiBundle> {
         .into_diagnostic()
         .wrap_err("failed to sign client certificate")?;
 
+    // --- Bridge daemon server cert (macOS Apple Container host) ---
+    let bridge_key = KeyPair::generate()
+        .into_diagnostic()
+        .wrap_err("failed to generate bridge key")?;
+    let bridge_sans = build_bridge_sans();
+    let mut bridge_params = CertificateParams::new(Vec::<String>::new())
+        .into_diagnostic()
+        .wrap_err("failed to create bridge cert params")?;
+    bridge_params.subject_alt_names = bridge_sans;
+    bridge_params
+        .distinguished_name
+        .push(DnType::CommonName, "openshell-bridge");
+
+    let bridge_cert = bridge_params
+        .signed_by(&bridge_key, &ca_cert, &ca_key)
+        .into_diagnostic()
+        .wrap_err("failed to sign bridge certificate")?;
+
     Ok(PkiBundle {
         ca_cert_pem: ca_cert.pem(),
         ca_key_pem: ca_key.serialize_pem(),
@@ -97,6 +126,8 @@ pub fn generate_pki(extra_sans: &[String]) -> Result<PkiBundle> {
         server_key_pem: server_key.serialize_pem(),
         client_cert_pem: client_cert.pem(),
         client_key_pem: client_key.serialize_pem(),
+        bridge_cert_pem: bridge_cert.pem(),
+        bridge_key_pem: bridge_key.serialize_pem(),
     })
 }
 
@@ -111,6 +142,15 @@ fn build_server_sans(extra_sans: &[String]) -> Vec<SanType> {
         add_san(&mut sans, s);
     }
 
+    sans
+}
+
+/// Build the SAN list for the bridge daemon server certificate.
+fn build_bridge_sans() -> Vec<SanType> {
+    let mut sans = Vec::new();
+    for s in BRIDGE_SERVER_SANS {
+        add_san(&mut sans, s);
+    }
     sans
 }
 
@@ -139,6 +179,8 @@ mod tests {
         assert!(bundle.server_key_pem.contains("BEGIN PRIVATE KEY"));
         assert!(bundle.client_cert_pem.contains("BEGIN CERTIFICATE"));
         assert!(bundle.client_key_pem.contains("BEGIN PRIVATE KEY"));
+        assert!(bundle.bridge_cert_pem.contains("BEGIN CERTIFICATE"));
+        assert!(bundle.bridge_key_pem.contains("BEGIN PRIVATE KEY"));
     }
 
     #[test]
@@ -154,5 +196,11 @@ mod tests {
 
         // Should have all default SANs + 2 extras
         assert_eq!(sans.len(), DEFAULT_SERVER_SANS.len() + 2);
+    }
+
+    #[test]
+    fn build_bridge_sans_includes_all_defaults() {
+        let sans = build_bridge_sans();
+        assert_eq!(sans.len(), BRIDGE_SERVER_SANS.len());
     }
 }

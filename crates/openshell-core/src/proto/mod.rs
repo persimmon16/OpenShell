@@ -74,7 +74,9 @@ pub mod inference {
     rust_2018_idioms
 )]
 pub mod bridge {
-    include!(concat!(env!("OUT_DIR"), "/openshell.bridge.v1.rs"));
+    pub mod v1 {
+        include!(concat!(env!("OUT_DIR"), "/openshell.bridge.v1.rs"));
+    }
 }
 
 pub use datamodel::v1::*;

@@ -16,8 +16,10 @@ graph TD
         CA["openshell-ca<br/>(self-signed root)"]
         SERVER_CERT["openshell-server cert<br/>(signed by CA)"]
         CLIENT_CERT["openshell-client cert<br/>(signed by CA, shared)"]
+        BRIDGE_CERT["openshell-bridge cert<br/>(signed by CA, macOS only)"]
         CA --> SERVER_CERT
         CA --> CLIENT_CERT
+        CA --> BRIDGE_CERT
     end
 
     subgraph CLUSTER["Kubernetes Cluster"]
@@ -59,8 +61,14 @@ openshell-ca  (Self-signed Root CA, O=openshell, CN=openshell-ca)
 │          localhost, host.docker.internal, 127.0.0.1
 │          + extra SANs for remote deployments
 │
-└── openshell-client  (Leaf cert, CN=openshell-client)
-    Shared by the CLI and all sandbox pods.
+├── openshell-client  (Leaf cert, CN=openshell-client)
+│   Shared by the CLI and all sandbox pods.
+│
+└── openshell-bridge  (Leaf cert, CN=openshell-bridge)
+    SANs: host.containers.internal, localhost, 127.0.0.1
+    Used by the container bridge daemon on macOS (Apple Container backend).
+    The gateway authenticates to the bridge using the client cert, and the
+    bridge presents this cert as its server identity.
 ```
 
 Key design decisions:
@@ -232,6 +240,57 @@ The sandbox calls two RPCs over this authenticated channel:
 - `GetSandboxSettings` -- fetches the YAML policy that governs the sandbox's behavior.
 - `GetSandboxProviderEnvironment` -- fetches provider credentials as environment variables.
 
+## Bridge Daemon Authentication (Apple Container Backend)
+
+When the gateway uses the `apple-container` sandbox backend (macOS), it manages sandboxes through a Swift bridge daemon running on the host. The bridge daemon exposes a gRPC service (`ContainerBridge`, defined in `proto/container_bridge.proto`) that translates calls into Apple Container XPC operations.
+
+### Threat
+
+Without authentication, any process on the vmnet (or localhost) could issue gRPC calls to the bridge daemon and create, destroy, or exec into sandbox containers.
+
+### Defense: Mutual TLS
+
+The gateway-to-bridge connection uses the same PKI trust root as all other OpenShell mTLS connections:
+
+- **Bridge server cert** (`CN=openshell-bridge`): presented by the bridge daemon. SANs include `host.containers.internal` (the hostname Apple Container VMs use to reach the host), `localhost`, and `127.0.0.1`.
+- **Client cert** (`CN=openshell-client`): presented by the gateway to authenticate itself to the bridge.
+- **CA verification**: both sides verify the peer's certificate against the OpenShell CA.
+
+```
+Gateway (Apple Container VM)
+  │
+  │  mTLS: client cert = openshell-client
+  │         server cert = openshell-bridge
+  │         CA = openshell-ca
+  ▼
+Bridge Daemon (macOS host, port 50052)
+  │
+  │  XPC (local IPC)
+  ▼
+Apple Container Runtime
+```
+
+### Configuration
+
+The bridge TLS is configured via CLI flags or environment variables on the gateway binary:
+
+| Flag | Env Var | Purpose |
+|---|---|---|
+| `--sandbox-backend` | `OPENSHELL_SANDBOX_BACKEND` | `"kubernetes"` (default) or `"apple-container"` |
+| `--bridge-endpoint` | `OPENSHELL_BRIDGE_ENDPOINT` | Bridge daemon gRPC endpoint (e.g., `https://host.containers.internal:50052`) |
+| `--bridge-tls-ca` | `OPENSHELL_BRIDGE_TLS_CA` | CA cert for verifying the bridge's server cert |
+| `--bridge-tls-cert` | `OPENSHELL_BRIDGE_TLS_CERT` | Client cert the gateway presents to the bridge |
+| `--bridge-tls-key` | `OPENSHELL_BRIDGE_TLS_KEY` | Client key for the gateway's bridge cert |
+
+When bridge TLS is not configured, the gateway connects without authentication and logs a warning. This is acceptable for local development but not for shared environments.
+
+### Implementation
+
+- PKI generation: `crates/openshell-bootstrap/src/pki.rs` — `PkiBundle` includes `bridge_cert_pem` and `bridge_key_pem`
+- Bridge client: `crates/openshell-server/src/sandbox/bridge_client.rs` — `BridgeClient::connect()` with tonic `ClientTlsConfig`
+- Proto definition: `proto/container_bridge.proto` — `ContainerBridge` service
+- Config: `crates/openshell-core/src/config.rs` — `BridgeTlsConfig` struct, `sandbox_backend` and `bridge_endpoint` fields
+
 ## SSH Tunnel Authentication
 
 SSH connections into sandboxes pass through the gateway's HTTP CONNECT tunnel at `/connect/ssh`. This adds a second authentication layer on top of mTLS.
@@ -337,6 +396,7 @@ graph LR
 | External → Gateway | mTLS with cluster CA by default, or trusted reverse-proxy/Cloudflare boundary in edge mode |
 | Sandbox → Gateway | mTLS with shared client cert |
 | Gateway → Sandbox (SSH) | Session token + HMAC-SHA256 handshake (NSSH1) |
+| Gateway → Bridge Daemon | mTLS with cluster CA (Apple Container backend only) |
 | Sandbox → External (network) | OPA policy + process identity binding via `/proc` |
 
 ### What Is Not Authenticated (by Design)

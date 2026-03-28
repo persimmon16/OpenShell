@@ -84,6 +84,28 @@ pub struct Config {
     /// allowing them to reach services running on the Docker host.
     #[serde(default)]
     pub host_gateway_ip: String,
+
+    /// Sandbox backend: `"kubernetes"` (default) or `"apple-container"`.
+    ///
+    /// When set to `"apple-container"`, the server manages sandboxes via
+    /// the container bridge daemon instead of the Kubernetes API.
+    #[serde(default = "default_sandbox_backend")]
+    pub sandbox_backend: String,
+
+    /// Endpoint of the container bridge daemon (e.g., `https://host.containers.internal:50052`).
+    ///
+    /// Required when `sandbox_backend` is `"apple-container"`. The gateway
+    /// connects to this endpoint over mutual TLS.
+    #[serde(default)]
+    pub bridge_endpoint: String,
+
+    /// TLS configuration for the container bridge connection.
+    ///
+    /// When set, the gateway authenticates to the bridge daemon using mTLS.
+    /// The gateway presents `bridge_tls.cert_path` / `bridge_tls.key_path`
+    /// as the client certificate and verifies the bridge's server certificate
+    /// against `bridge_tls.ca_path`.
+    pub bridge_tls: Option<BridgeTlsConfig>,
 }
 
 /// TLS configuration.
@@ -112,6 +134,23 @@ pub struct TlsConfig {
     pub allow_unauthenticated: bool,
 }
 
+/// TLS configuration for the gateway-to-bridge-daemon connection.
+///
+/// Both sides authenticate: the bridge daemon verifies the gateway's client
+/// certificate, and the gateway verifies the bridge daemon's server certificate.
+/// All certificates must be signed by the same CA.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BridgeTlsConfig {
+    /// Path to the CA certificate for verifying the bridge daemon's server cert.
+    pub ca_path: PathBuf,
+
+    /// Path to the client certificate the gateway presents to the bridge daemon.
+    pub cert_path: PathBuf,
+
+    /// Path to the private key for the client certificate.
+    pub key_path: PathBuf,
+}
+
 impl Config {
     /// Create a new config with optional TLS.
     pub fn new(tls: Option<TlsConfig>) -> Self {
@@ -133,6 +172,9 @@ impl Config {
             ssh_session_ttl_secs: default_ssh_session_ttl_secs(),
             client_tls_secret_name: String::new(),
             host_gateway_ip: String::new(),
+            sandbox_backend: default_sandbox_backend(),
+            bridge_endpoint: String::new(),
+            bridge_tls: None,
         }
     }
 
@@ -247,6 +289,27 @@ impl Config {
         self.host_gateway_ip = ip.into();
         self
     }
+
+    /// Set the sandbox backend (`"kubernetes"` or `"apple-container"`).
+    #[must_use]
+    pub fn with_sandbox_backend(mut self, backend: impl Into<String>) -> Self {
+        self.sandbox_backend = backend.into();
+        self
+    }
+
+    /// Set the container bridge daemon endpoint.
+    #[must_use]
+    pub fn with_bridge_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.bridge_endpoint = endpoint.into();
+        self
+    }
+
+    /// Set the mTLS configuration for the bridge daemon connection.
+    #[must_use]
+    pub fn with_bridge_tls(mut self, tls: BridgeTlsConfig) -> Self {
+        self.bridge_tls = Some(tls);
+        self
+    }
 }
 
 fn default_bind_address() -> SocketAddr {
@@ -283,4 +346,8 @@ const fn default_ssh_handshake_skew_secs() -> u64 {
 
 const fn default_ssh_session_ttl_secs() -> u64 {
     86400 // 24 hours
+}
+
+fn default_sandbox_backend() -> String {
+    "kubernetes".to_string()
 }

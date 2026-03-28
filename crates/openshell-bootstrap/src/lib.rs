@@ -887,6 +887,10 @@ async fn load_existing_pki_bundle(
         server_key_pem: server_key,
         client_cert_pem: client_cert,
         client_key_pem: client_key,
+        // Bridge certs are only generated during initial PKI creation for the
+        // Apple Container path; they are not stored in Kubernetes secrets.
+        bridge_cert_pem: String::new(),
+        bridge_key_pem: String::new(),
     })
 }
 

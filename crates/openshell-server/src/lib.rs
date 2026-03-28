@@ -28,12 +28,14 @@ use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
+use tokio::sync::broadcast;
 use tracing::{debug, error, info};
 
 pub use grpc::OpenShellService;
 pub use http::{health_router, http_router};
 pub use multiplex::{MultiplexService, MultiplexedService};
 use persistence::Store;
+use sandbox::bridge_client::BridgeClient;
 use sandbox::{SandboxClient, spawn_sandbox_watcher, spawn_store_reconciler};
 use sandbox_index::SandboxIndex;
 use sandbox_watch::{SandboxWatchBus, spawn_kube_event_tailer};
@@ -72,6 +74,50 @@ pub struct ServerState {
     /// set/delete operation, including the precedence check on sandbox
     /// mutations that reads global state.
     pub settings_mutex: tokio::sync::Mutex<()>,
+
+    /// Container bridge daemon client (Apple Container backend).
+    /// Present only when `sandbox_backend` is `"apple-container"`.
+    /// Authenticated via mutual TLS using the OpenShell PKI.
+    pub bridge_client: Option<BridgeClient>,
+}
+
+/// Listen for shutdown signals (SIGTERM/SIGINT on Unix, Ctrl-C on others).
+///
+/// Returns a receiver that closes when shutdown is initiated.
+#[cfg(unix)]
+async fn listen_for_shutdown() -> broadcast::Receiver<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let (tx, rx) = broadcast::channel(1);
+    let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+    let mut sigint = signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
+
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM");
+            }
+            _ = sigint.recv() => {
+                info!("Received SIGINT");
+            }
+        }
+        let _ = tx.send(());
+    });
+
+    rx
+}
+
+#[cfg(not(unix))]
+async fn listen_for_shutdown() -> broadcast::Receiver<()> {
+    let (tx, rx) = broadcast::channel(1);
+
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        info!("Received Ctrl-C");
+        let _ = tx.send(());
+    });
+
+    rx
 }
 
 fn is_benign_tls_handshake_failure(error: &std::io::Error) -> bool {
@@ -91,6 +137,7 @@ impl ServerState {
         sandbox_index: SandboxIndex,
         sandbox_watch_bus: SandboxWatchBus,
         tracing_log_bus: TracingLogBus,
+        bridge_client: Option<BridgeClient>,
     ) -> Self {
         Self {
             config,
@@ -102,6 +149,7 @@ impl ServerState {
             ssh_connections_by_token: Mutex::new(HashMap::new()),
             ssh_connections_by_sandbox: Mutex::new(HashMap::new()),
             settings_mutex: tokio::sync::Mutex::new(()),
+            bridge_client,
         }
     }
 }
@@ -124,7 +172,38 @@ pub async fn run_server(config: Config, tracing_log_bus: TracingLogBus) -> Resul
         ));
     }
 
+    let is_apple_container = config.sandbox_backend == "apple-container";
+
+    // Validate bridge configuration when using the apple-container backend.
+    if is_apple_container {
+        if config.bridge_endpoint.is_empty() {
+            return Err(Error::config(
+                "bridge_endpoint is required when sandbox_backend is 'apple-container'. \
+                 Set --bridge-endpoint or OPENSHELL_BRIDGE_ENDPOINT",
+            ));
+        }
+        if config.bridge_tls.is_none() {
+            info!(
+                "Bridge mTLS not configured — connecting to bridge daemon without authentication. \
+                 Set --bridge-tls-ca, --bridge-tls-cert, and --bridge-tls-key for production use."
+            );
+        }
+    }
+
     let store = Store::connect(database_url).await?;
+
+    // Connect to the container bridge daemon when using the apple-container backend.
+    let bridge_client = if is_apple_container {
+        let client = if let Some(ref bridge_tls) = config.bridge_tls {
+            BridgeClient::connect(&config.bridge_endpoint, bridge_tls).await?
+        } else {
+            BridgeClient::connect_insecure(&config.bridge_endpoint).await?
+        };
+        Some(client)
+    } else {
+        None
+    };
+
     let sandbox_client = SandboxClient::new(
         config.sandbox_namespace.clone(),
         config.sandbox_image.clone(),
@@ -149,6 +228,7 @@ pub async fn run_server(config: Config, tracing_log_bus: TracingLogBus) -> Resul
         sandbox_index,
         sandbox_watch_bus,
         tracing_log_bus,
+        bridge_client,
     ));
 
     spawn_sandbox_watcher(
@@ -191,44 +271,58 @@ pub async fn run_server(config: Config, tracing_log_bus: TracingLogBus) -> Resul
         None
     };
 
-    // Accept connections
+    // Accept connections with graceful shutdown support
+    let mut shutdown_rx = listen_for_shutdown().await;
+
     loop {
-        let (stream, addr) = match listener.accept().await {
-            Ok(conn) => conn,
-            Err(e) => {
-                error!(error = %e, "Failed to accept connection");
-                continue;
-            }
-        };
+        tokio::select! {
+            accept_result = listener.accept() => {
+                let (stream, addr) = match accept_result {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        error!(error = %e, "Failed to accept connection");
+                        continue;
+                    }
+                };
 
-        let service = service.clone();
+                let service = service.clone();
 
-        if let Some(ref acceptor) = tls_acceptor {
-            let tls_acceptor = acceptor.clone();
-            tokio::spawn(async move {
-                match tls_acceptor.inner().accept(stream).await {
-                    Ok(tls_stream) => {
-                        if let Err(e) = service.serve(tls_stream).await {
+                if let Some(ref acceptor) = tls_acceptor {
+                    let tls_acceptor = acceptor.clone();
+                    tokio::spawn(async move {
+                        match tls_acceptor.inner().accept(stream).await {
+                            Ok(tls_stream) => {
+                                if let Err(e) = service.serve(tls_stream).await {
+                                    error!(error = %e, client = %addr, "Connection error");
+                                }
+                            }
+                            Err(e) => {
+                                if is_benign_tls_handshake_failure(&e) {
+                                    debug!(error = %e, client = %addr, "TLS handshake closed early");
+                                } else {
+                                    error!(error = %e, client = %addr, "TLS handshake failed");
+                                }
+                            }
+                        }
+                    });
+                } else {
+                    tokio::spawn(async move {
+                        if let Err(e) = service.serve(stream).await {
                             error!(error = %e, client = %addr, "Connection error");
                         }
-                    }
-                    Err(e) => {
-                        if is_benign_tls_handshake_failure(&e) {
-                            debug!(error = %e, client = %addr, "TLS handshake closed early");
-                        } else {
-                            error!(error = %e, client = %addr, "TLS handshake failed");
-                        }
-                    }
+                    });
                 }
-            });
-        } else {
-            tokio::spawn(async move {
-                if let Err(e) = service.serve(stream).await {
-                    error!(error = %e, client = %addr, "Connection error");
-                }
-            });
+            }
+            _ = shutdown_rx.recv() => {
+                info!("Shutdown signal received, stopping acceptance of new connections");
+                break;
+            }
         }
     }
+
+    info!("Graceful shutdown complete");
+
+    Ok(())
 }
 
 #[cfg(test)]
