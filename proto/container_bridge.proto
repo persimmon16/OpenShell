@@ -1,0 +1,235 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+// Container Bridge service definition.
+//
+// This gRPC service runs on the macOS host and translates container management
+// requests from the gateway (running inside an Apple Container VM) into XPC
+// calls against the Apple Container runtime.
+
+syntax = "proto3";
+
+package openshell.bridge.v1;
+
+// Container management service bridging gRPC to Apple Container XPC.
+service ContainerBridge {
+  // Health check.
+  rpc Health(BridgeHealthRequest) returns (BridgeHealthResponse);
+
+  // Container lifecycle (used for sandbox management).
+  rpc CreateContainer(CreateContainerRequest) returns (ContainerResponse);
+  rpc StartContainer(StartContainerRequest) returns (StartContainerResponse);
+  rpc StopContainer(StopContainerRequest) returns (StopContainerResponse);
+  rpc DeleteContainer(DeleteContainerRequest) returns (DeleteContainerResponse);
+  rpc GetContainer(GetContainerRequest) returns (ContainerResponse);
+  rpc ListContainers(ListContainersRequest) returns (ListContainersResponse);
+
+  // Watch for container state changes (polling-based, emits events via server streaming).
+  rpc WatchContainers(WatchContainersRequest) returns (stream ContainerEvent);
+
+  // Stream container logs.
+  rpc ContainerLogs(ContainerLogsRequest) returns (stream LogChunk);
+
+  // Execute a command inside a container.
+  rpc ExecContainer(ExecContainerRequest) returns (stream ExecEvent);
+
+  // Image management.
+  rpc PullImage(PullImageRequest) returns (stream PullProgress);
+  rpc ListImages(ListImagesRequest) returns (ListImagesResponse);
+  rpc DeleteImage(DeleteImageRequest) returns (DeleteImageResponse);
+
+  // Network management.
+  rpc CreateNetwork(CreateNetworkRequest) returns (NetworkResponse);
+  rpc DeleteNetwork(DeleteNetworkRequest) returns (DeleteNetworkResponse);
+}
+
+// ── Health ─────────────────────────────────────────────────────────
+
+message BridgeHealthRequest {}
+
+message BridgeHealthResponse {
+  string status = 1;
+  string version = 2;
+}
+
+// ── Container lifecycle ────────────────────────────────────────────
+
+message CreateContainerRequest {
+  string name = 1;
+  string image = 2;
+  map<string, string> env = 3;
+  repeated PortMapping ports = 4;
+  repeated VolumeMount volumes = 5;
+  ContainerResources resources = 6;
+  repeated string command = 7;
+  map<string, string> labels = 8;
+}
+
+message PortMapping {
+  uint32 host_port = 1;
+  uint32 container_port = 2;
+  string protocol = 3; // "tcp" or "udp"
+}
+
+message VolumeMount {
+  string host_path = 1;
+  string container_path = 2;
+  bool read_only = 3;
+}
+
+message ContainerResources {
+  uint32 cpus = 1;       // Number of CPUs
+  uint64 memory_mb = 2;  // Memory in megabytes
+}
+
+message ContainerResponse {
+  string id = 1;
+  string name = 2;
+  string image = 3;
+  ContainerState state = 4;
+  map<string, string> labels = 5;
+  string created_at = 6;
+}
+
+enum ContainerState {
+  CONTAINER_STATE_UNKNOWN = 0;
+  CONTAINER_STATE_CREATED = 1;
+  CONTAINER_STATE_RUNNING = 2;
+  CONTAINER_STATE_STOPPED = 3;
+  CONTAINER_STATE_EXITED = 4;
+}
+
+message StartContainerRequest {
+  string name = 1;
+}
+
+message StartContainerResponse {}
+
+message StopContainerRequest {
+  string name = 1;
+  uint32 timeout_seconds = 2;
+}
+
+message StopContainerResponse {}
+
+message DeleteContainerRequest {
+  string name = 1;
+  bool force = 2;
+}
+
+message DeleteContainerResponse {}
+
+message GetContainerRequest {
+  string name = 1;
+}
+
+message ListContainersRequest {
+  map<string, string> label_selector = 1;
+  bool all = 2;  // Include stopped containers
+}
+
+message ListContainersResponse {
+  repeated ContainerResponse containers = 1;
+}
+
+// ── Watch ──────────────────────────────────────────────────────────
+
+message WatchContainersRequest {
+  map<string, string> label_selector = 1;
+}
+
+message ContainerEvent {
+  ContainerEventType type = 1;
+  ContainerResponse container = 2;
+}
+
+enum ContainerEventType {
+  CONTAINER_EVENT_UNKNOWN = 0;
+  CONTAINER_EVENT_CREATED = 1;
+  CONTAINER_EVENT_STARTED = 2;
+  CONTAINER_EVENT_STOPPED = 3;
+  CONTAINER_EVENT_DELETED = 4;
+}
+
+// ── Logs ───────────────────────────────────────────────────────────
+
+message ContainerLogsRequest {
+  string name = 1;
+  bool follow = 2;
+  uint32 tail_lines = 3;
+  bool timestamps = 4;
+}
+
+message LogChunk {
+  bytes data = 1;
+  LogStream stream = 2;
+}
+
+enum LogStream {
+  LOG_STREAM_STDOUT = 0;
+  LOG_STREAM_STDERR = 1;
+}
+
+// ── Exec ───────────────────────────────────────────────────────────
+
+message ExecContainerRequest {
+  string name = 1;
+  repeated string command = 2;
+  bool tty = 3;
+}
+
+message ExecEvent {
+  oneof event {
+    bytes stdout = 1;
+    bytes stderr = 2;
+    int32 exit_code = 3;
+  }
+}
+
+// ── Image management ───────────────────────────────────────────────
+
+message PullImageRequest {
+  string reference = 1;
+}
+
+message PullProgress {
+  string status = 1;
+  string detail = 2;
+  float progress_percent = 3;
+}
+
+message ListImagesRequest {}
+
+message ListImagesResponse {
+  repeated ImageInfo images = 1;
+}
+
+message ImageInfo {
+  string id = 1;
+  repeated string tags = 2;
+  uint64 size_bytes = 3;
+  string created_at = 4;
+}
+
+message DeleteImageRequest {
+  string reference = 1;
+  bool force = 2;
+}
+
+message DeleteImageResponse {}
+
+// ── Network ────────────────────────────────────────────────────────
+
+message CreateNetworkRequest {
+  string name = 1;
+}
+
+message NetworkResponse {
+  string name = 1;
+}
+
+message DeleteNetworkRequest {
+  string name = 1;
+}
+
+message DeleteNetworkResponse {}

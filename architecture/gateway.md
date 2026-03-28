@@ -2,7 +2,17 @@
 
 ## Overview
 
-`openshell-server` is the gateway -- the central control plane for a cluster. It exposes two gRPC services (OpenShell and Inference) and HTTP endpoints on a single multiplexed port, manages sandbox lifecycle through Kubernetes CRDs, persists state in SQLite or Postgres, and provides SSH tunneling into sandbox pods. The gateway coordinates all interactions between clients, the Kubernetes cluster, and the persistence layer.
+`openshell-server` is the gateway -- the central control plane for a cluster. It exposes two gRPC services (OpenShell and Inference) and HTTP endpoints on a single multiplexed port, manages sandbox lifecycle, persists state in SQLite or Postgres, and provides SSH tunneling into sandboxes. The gateway coordinates all interactions between clients, the sandbox backend, and the persistence layer.
+
+### Dual-Backend Sandbox Management
+
+The gateway supports two sandbox backends:
+
+- **Kubernetes (Docker + k3s)**: Used on Linux and for remote deployments. Sandboxes are Kubernetes pods managed via the kube-rs client. The gateway runs inside a Docker container with an embedded k3s cluster.
+
+- **Apple Container (macOS)**: Used for local macOS development. Sandboxes are lightweight VMs managed via a Swift bridge daemon that translates gRPC calls to Apple Container XPC. The gateway runs inside an Apple Container VM, no Kubernetes involved.
+
+The backend is selected automatically at gateway startup based on the platform and available runtimes. The `runtime_type` field in `GatewayMetadata` records which backend was used so subsequent operations (stop, destroy, logs) dispatch correctly.
 
 ## Architecture Diagram
 

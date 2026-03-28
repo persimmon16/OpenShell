@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Gateway-only image for Apple Container (macOS).
+#
+# This is a minimal image that runs openshell-server directly — no k3s,
+# no Helm, no Kubernetes. Sandboxes are managed via the Swift bridge daemon
+# running on the macOS host.
+
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the server binary.
+COPY openshell-server /usr/local/bin/openshell-server
+
+# PKI is mounted at runtime via volume.
+VOLUME /etc/openshell-tls
+
+# Data directory for the gateway.
+VOLUME /var/openshell
+
+EXPOSE 8080
+
+ENTRYPOINT ["openshell-server"]
+CMD ["--port", "8080"]

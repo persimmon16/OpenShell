@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod build;
+pub mod container_runtime;
 pub mod edge_token;
 pub mod errors;
 pub mod image;
@@ -14,6 +15,8 @@ mod paths;
 mod pki;
 pub(crate) mod push;
 mod runtime;
+#[cfg(target_os = "macos")]
+mod runtime_apple;
 
 /// Shared lock for tests that mutate the process-global `XDG_CONFIG_HOME`
 /// env var. All such tests in any module must hold this lock to avoid
@@ -26,13 +29,10 @@ use miette::{IntoDiagnostic, Result};
 use std::sync::{Arc, Mutex};
 
 use crate::constants::{
-    CLIENT_TLS_SECRET_NAME, SERVER_CLIENT_CA_SECRET_NAME, SERVER_TLS_SECRET_NAME, network_name,
-    volume_name,
+    CLIENT_TLS_SECRET_NAME, SERVER_CLIENT_CA_SECRET_NAME, SERVER_TLS_SECRET_NAME,
 };
-use crate::docker::{
-    check_existing_gateway, check_port_conflicts, destroy_gateway_resources, ensure_container,
-    ensure_image, ensure_network, ensure_volume, start_container, stop_container,
-};
+use crate::container_runtime::{GatewayContainerConfig, RuntimeBackend};
+use crate::docker::{DockerRuntime, ensure_image};
 use crate::metadata::{
     create_gateway_metadata, create_gateway_metadata_with_host, local_gateway_host,
 };
@@ -40,10 +40,11 @@ use crate::mtls::store_pki_bundle;
 use crate::pki::generate_pki;
 use crate::runtime::{
     clean_stale_nodes, exec_capture_with_exit, fetch_recent_logs, openshell_workload_exists,
-    restart_openshell_deployment, wait_for_gateway_ready,
+    restart_openshell_deployment,
 };
 
 pub use crate::constants::container_name;
+pub use crate::container_runtime::{ExistingGateway, PortConflict, RuntimePreflight};
 pub use crate::docker::{
     DockerPreflight, ExistingGatewayInfo, check_docker_available, create_ssh_docker_client,
 };
@@ -53,6 +54,33 @@ pub use crate::metadata::{
     load_gateway_metadata, load_last_sandbox, remove_gateway_metadata, resolve_ssh_hostname,
     save_active_gateway, save_last_sandbox, store_gateway_metadata,
 };
+
+/// Create the appropriate container runtime backend for the current platform.
+///
+/// On macOS, if Apple Container is available, it is preferred over Docker.
+/// Remote SSH deployments always use Docker. Linux always uses Docker.
+pub async fn create_runtime(remote: Option<&RemoteOptions>) -> Result<RuntimeBackend> {
+    if let Some(remote_opts) = remote {
+        let docker = create_ssh_docker_client(remote_opts).await?;
+        return Ok(RuntimeBackend::Docker(DockerRuntime::from_client(docker)));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use container_runtime::apple_container_available;
+        use runtime_apple::AppleContainerRuntime;
+        if apple_container_available() {
+            return Ok(RuntimeBackend::AppleContainer(
+                AppleContainerRuntime::new(),
+            ));
+        }
+    }
+
+    let preflight = check_docker_available().await?;
+    Ok(RuntimeBackend::Docker(DockerRuntime::from_preflight(
+        preflight,
+    )))
+}
 
 /// Options for remote SSH deployment.
 #[derive(Debug, Clone)]
@@ -202,11 +230,10 @@ impl DeployOptions {
     }
 }
 
-#[derive(Debug, Clone)]
 pub struct GatewayHandle {
     name: String,
     metadata: GatewayMetadata,
-    docker: Docker,
+    runtime: RuntimeBackend,
 }
 
 impl GatewayHandle {
@@ -220,30 +247,30 @@ impl GatewayHandle {
         &self.metadata.gateway_endpoint
     }
 
+    /// Get a reference to the runtime backend.
+    pub fn runtime(&self) -> &RuntimeBackend {
+        &self.runtime
+    }
+
     pub async fn stop(&self) -> Result<()> {
-        stop_container(&self.docker, &container_name(&self.name)).await
+        self.runtime.stop_gateway(&self.name).await
     }
 
     pub async fn destroy(&self) -> Result<()> {
-        destroy_gateway_resources(&self.docker, &self.name).await
+        self.runtime.destroy_resources(&self.name).await
     }
 }
 
 /// Check whether a gateway with the given name already has resources deployed.
 ///
 /// Returns `None` if no existing gateway resources are found, or
-/// `Some(ExistingGatewayInfo)` with details about what exists.
+/// `Some(ExistingGateway)` with details about what exists.
 pub async fn check_existing_deployment(
     name: &str,
     remote: Option<&RemoteOptions>,
-) -> Result<Option<ExistingGatewayInfo>> {
-    let docker = if let Some(remote_opts) = remote {
-        create_ssh_docker_client(remote_opts).await?
-    } else {
-        let preflight = check_docker_available().await?;
-        preflight.docker
-    };
-    check_existing_gateway(&docker, name).await
+) -> Result<Option<ExistingGateway>> {
+    let runtime = create_runtime(remote).await?;
+    runtime.check_existing(name).await
 }
 
 pub async fn deploy_gateway(options: DeployOptions) -> Result<GatewayHandle> {
@@ -276,24 +303,17 @@ where
         }
     };
 
-    // Create Docker client based on deployment mode.
-    // For local deploys, run a preflight check to fail fast with actionable
-    // guidance when Docker is not installed, not running, or unreachable.
-    let (target_docker, remote_opts) = if let Some(remote_opts) = &options.remote {
-        let remote = create_ssh_docker_client(remote_opts).await?;
-        (remote, Some(remote_opts.clone()))
-    } else {
-        log("[status] Checking Docker".to_string());
-        let preflight = check_docker_available().await?;
-        (preflight.docker, None)
-    };
+    // Select the container runtime for this deployment.
+    log("[status] Checking runtime".to_string());
+    let runtime = create_runtime(options.remote.as_ref()).await?;
+    let remote_opts = options.remote.clone();
 
     // If an existing gateway is found, either tear it down (when recreate is
     // requested) or bail out so the caller can prompt the user / reuse it.
-    if let Some(existing) = check_existing_gateway(&target_docker, &name).await? {
+    if let Some(existing) = runtime.check_existing(&name).await? {
         if recreate {
             log("[status] Removing existing gateway".to_string());
-            destroy_gateway_resources(&target_docker, &name).await?;
+            runtime.destroy_resources(&name).await?;
         } else {
             return Err(miette::miette!(
                 "Gateway '{name}' already exists (container_running={}).\n\
@@ -304,7 +324,7 @@ where
         }
     }
 
-    // Ensure the image is available on the target Docker daemon
+    // Ensure the image is available on the target runtime.
     if remote_opts.is_some() {
         log("[status] Downloading gateway".to_string());
         let on_log_clone = Arc::clone(&on_log);
@@ -313,45 +333,35 @@ where
                 f(msg);
             }
         };
-        image::pull_remote_image(
-            &target_docker,
-            &image_ref,
-            registry_username.as_deref(),
-            registry_token.as_deref(),
-            progress_cb,
-        )
-        .await?;
+        runtime
+            .pull_image(
+                &image_ref,
+                registry_username.as_deref(),
+                registry_token.as_deref(),
+                progress_cb,
+            )
+            .await?;
     } else {
-        // Local deployment: ensure image exists (pull if needed)
         log("[status] Downloading gateway".to_string());
-        ensure_image(
-            &target_docker,
-            &image_ref,
-            registry_username.as_deref(),
-            registry_token.as_deref(),
-        )
-        .await?;
+        runtime
+            .ensure_image(
+                &image_ref,
+                registry_username.as_deref(),
+                registry_token.as_deref(),
+            )
+            .await?;
     }
 
-    // All subsequent operations use the target Docker (remote or local)
     log("[status] Initializing environment".to_string());
-    ensure_network(&target_docker, &network_name(&name)).await?;
-    ensure_volume(&target_docker, &volume_name(&name)).await?;
+    runtime.ensure_network(&name).await?;
+    runtime.ensure_storage(&name).await?;
 
     // Compute extra TLS SANs for remote deployments so the gateway and k3s
     // API server certificates include the remote host's IP/hostname.
-    // Also determine the SSH gateway host so the server returns the correct
-    // address to CLI clients for SSH proxy CONNECT requests.
-    //
-    // When `gateway_host` is provided (e.g., `host.docker.internal` in CI),
-    // it is added to the SAN list and used as `ssh_gateway_host` so the
-    // server advertises the correct address even for local clusters.
     let (extra_sans, ssh_gateway_host): (Vec<String>, Option<String>) =
         if let Some(opts) = remote_opts.as_ref() {
             let ssh_host = extract_host_from_ssh_destination(&opts.destination);
             let resolved = resolve_ssh_hostname(&ssh_host);
-            // Include both the SSH alias and resolved IP if they differ, so the
-            // certificate covers both names.
             let mut sans = vec![resolved.clone()];
             if ssh_host != resolved {
                 sans.push(ssh_host);
@@ -373,11 +383,7 @@ where
         };
 
     // Check for port conflicts before creating/starting the container.
-    // Docker silently fails to attach networking when a host port is already
-    // bound by another container, leaving the new container with only loopback
-    // and no default route.  Detecting this up-front avoids a confusing 30s
-    // timeout followed by a misleading "Docker networking issue" diagnostic.
-    let conflicts = check_port_conflicts(&target_docker, &name, port).await?;
+    let conflicts = runtime.check_port_conflicts(&name, port).await?;
     if !conflicts.is_empty() {
         let details: Vec<String> = conflicts
             .iter()
@@ -400,117 +406,136 @@ where
         ));
     }
 
-    // From this point on, Docker resources (container, volume, network) are
-    // being created. If any subsequent step fails, we must clean up to avoid
-    // leaving an orphaned volume in a corrupted state that blocks retries.
-    // See: https://github.com/NVIDIA/OpenShell/issues/463
+    // From this point on, runtime resources are being created. If any
+    // subsequent step fails, clean up to avoid orphaned state.
+    let config = GatewayContainerConfig {
+        image_ref: image_ref.clone(),
+        extra_sans: extra_sans.clone(),
+        ssh_gateway_host: ssh_gateway_host.clone(),
+        gateway_port: port,
+        disable_tls,
+        disable_gateway_auth,
+        registry_username: registry_username.clone(),
+        registry_token: registry_token.clone(),
+        gpu,
+    };
+
     let deploy_result: Result<GatewayMetadata> = async {
-        ensure_container(
-            &target_docker,
-            &name,
-            &image_ref,
-            &extra_sans,
-            ssh_gateway_host.as_deref(),
-            port,
-            disable_tls,
-            disable_gateway_auth,
-            registry_username.as_deref(),
-            registry_token.as_deref(),
-            gpu,
-        )
-        .await?;
-        start_container(&target_docker, &name).await?;
+        runtime.create_gateway(&name, &config).await?;
+        runtime.start_gateway(&name).await?;
 
-        // Clean up stale k3s nodes left over from previous container instances that
-        // used the same persistent volume. Without this, pods remain scheduled on
-        // NotReady ghost nodes and the health check will time out.
-        match clean_stale_nodes(&target_docker, &name).await {
-            Ok(0) => {}
-            Ok(n) => tracing::debug!("removed {n} stale node(s)"),
-            Err(err) => {
-                tracing::debug!("stale node cleanup failed (non-fatal): {err}");
+        // k3s-specific operations: stale node cleanup, PKI reconciliation via
+        // kubectl, image push into containerd.
+        if runtime.uses_kubernetes() {
+            let docker = match &runtime {
+                RuntimeBackend::Docker(r) => r.docker(),
+                #[cfg(target_os = "macos")]
+                _ => unreachable!("uses_kubernetes() is true only for Docker"),
+            };
+
+            match clean_stale_nodes(docker, &name).await {
+                Ok(0) => {}
+                Ok(n) => tracing::debug!("removed {n} stale node(s)"),
+                Err(err) => {
+                    tracing::debug!("stale node cleanup failed (non-fatal): {err}");
+                }
             }
-        }
 
-        // Reconcile PKI: reuse existing cluster TLS secrets if they are complete and
-        // valid; only generate fresh PKI when secrets are missing, incomplete,
-        // malformed, or expiring within MIN_REMAINING_VALIDITY_DAYS.
-        //
-        // Ordering is: reconcile secrets -> (if rotated and workload exists:
-        // rollout restart and wait) -> persist CLI-side bundle.
-        //
-        // We check workload presence before reconciliation. On a fresh/recreated
-        // cluster, secrets are always newly generated and a restart is unnecessary.
-        // Restarting only when workload pre-existed avoids extra rollout latency.
-        let workload_existed_before_pki = openshell_workload_exists(&target_docker, &name).await?;
-        let (pki_bundle, rotated) = reconcile_pki(&target_docker, &name, &extra_sans, &log).await?;
+            let workload_existed_before_pki = openshell_workload_exists(docker, &name).await?;
+            let (pki_bundle, rotated) =
+                reconcile_pki(docker, &name, &extra_sans, &log).await?;
 
-        if rotated && workload_existed_before_pki {
-            // If an openshell workload is already running, it must be restarted so
-            // it picks up the new TLS secrets before we write CLI-side certs.
-            // A failed rollout is a hard error — CLI certs must not be persisted
-            // if the server cannot come up with the new PKI.
-            restart_openshell_deployment(&target_docker, &name).await?;
-        }
+            if rotated && workload_existed_before_pki {
+                restart_openshell_deployment(docker, &name).await?;
+            }
 
-        store_pki_bundle(&name, &pki_bundle)?;
+            store_pki_bundle(&name, &pki_bundle)?;
 
-        // Push locally-built component images into the k3s containerd runtime.
-        // This is the "push" path for local development — images are exported from
-        // the local Docker daemon and streamed into the cluster's containerd so
-        // k3s can resolve them without pulling from the remote registry.
-        if remote_opts.is_none()
-            && let Ok(push_images_str) = std::env::var("OPENSHELL_PUSH_IMAGES")
-        {
-            let images: Vec<&str> = push_images_str
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .collect();
-            if !images.is_empty() {
-                log("[status] Deploying components".to_string());
-                let local_docker = Docker::connect_with_local_defaults().into_diagnostic()?;
-                let container = container_name(&name);
-                let on_log_ref = Arc::clone(&on_log);
-                let mut push_log = move |msg: String| {
-                    if let Ok(mut f) = on_log_ref.lock() {
-                        f(msg);
-                    }
-                };
-                push::push_local_images(
-                    &local_docker,
-                    &target_docker,
-                    &container,
-                    &images,
-                    &mut push_log,
+            // Push locally-built component images into the k3s containerd runtime.
+            if remote_opts.is_none()
+                && let Ok(push_images_str) = std::env::var("OPENSHELL_PUSH_IMAGES")
+            {
+                let images: Vec<&str> = push_images_str
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !images.is_empty() {
+                    log("[status] Deploying components".to_string());
+                    let local_docker =
+                        Docker::connect_with_local_defaults().into_diagnostic()?;
+                    let container = container_name(&name);
+                    let on_log_ref = Arc::clone(&on_log);
+                    let mut push_log = move |msg: String| {
+                        if let Ok(mut f) = on_log_ref.lock() {
+                            f(msg);
+                        }
+                    };
+                    push::push_local_images(
+                        &local_docker,
+                        docker,
+                        &container,
+                        &images,
+                        &mut push_log,
+                    )
+                    .await?;
+
+                    restart_openshell_deployment(docker, &name).await?;
+                }
+            }
+        } else {
+            // Non-Kubernetes path (Apple Container): generate PKI and write to
+            // the volume-mounted directory so the gateway server picks them up.
+            log("[progress] Generating TLS certificates".to_string());
+            let pki_bundle = generate_pki(&extra_sans)?;
+            store_pki_bundle(&name, &pki_bundle)?;
+
+            // Also write server-side PKI to the Apple Container volume mount.
+            #[cfg(target_os = "macos")]
+            {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+                let pki_dir = format!("{home}/.openshell/gateways/{name}/pki");
+                std::fs::create_dir_all(&pki_dir).into_diagnostic()?;
+                std::fs::write(
+                    format!("{pki_dir}/ca.crt"),
+                    &pki_bundle.ca_cert_pem,
                 )
-                .await?;
-
-                restart_openshell_deployment(&target_docker, &name).await?;
+                .into_diagnostic()?;
+                std::fs::write(
+                    format!("{pki_dir}/tls.crt"),
+                    &pki_bundle.server_cert_pem,
+                )
+                .into_diagnostic()?;
+                std::fs::write(
+                    format!("{pki_dir}/tls.key"),
+                    &pki_bundle.server_key_pem,
+                )
+                .into_diagnostic()?;
             }
         }
 
         log("[status] Starting gateway".to_string());
         {
-            // Create a short-lived closure that locks on each call rather than holding
-            // the MutexGuard across await points.
             let on_log_ref = Arc::clone(&on_log);
             let mut gateway_log = move |msg: String| {
                 if let Ok(mut f) = on_log_ref.lock() {
                     f(msg);
                 }
             };
-            wait_for_gateway_ready(&target_docker, &name, &mut gateway_log).await?;
+            runtime
+                .wait_for_ready(&name, &mut gateway_log)
+                .await?;
         }
 
         // Create and store gateway metadata.
-        let metadata = create_gateway_metadata_with_host(
+        let mut metadata = create_gateway_metadata_with_host(
             &name,
             remote_opts.as_ref(),
             port,
             ssh_gateway_host.as_deref(),
             disable_tls,
         );
+        metadata.runtime_type = runtime.runtime_type();
         store_gateway_metadata(&name, &metadata)?;
 
         Ok(metadata)
@@ -521,13 +546,11 @@ where
         Ok(metadata) => Ok(GatewayHandle {
             name,
             metadata,
-            docker: target_docker,
+            runtime,
         }),
         Err(deploy_err) => {
-            // Automatically clean up Docker resources (volume, container, network,
-            // image) so the environment is left in a retryable state.
             tracing::info!("deploy failed, cleaning up gateway resources for '{name}'");
-            if let Err(cleanup_err) = destroy_gateway_resources(&target_docker, &name).await {
+            if let Err(cleanup_err) = runtime.destroy_resources(&name).await {
                 tracing::warn!(
                     "automatic cleanup after failed deploy also failed: {cleanup_err}. \
                      Manual cleanup may be required: \
@@ -544,18 +567,13 @@ where
 /// For local gateways, pass `None` for remote options.
 /// For remote gateways, pass the same `RemoteOptions` used during deployment.
 pub async fn gateway_handle(name: &str, remote: Option<&RemoteOptions>) -> Result<GatewayHandle> {
-    let docker = match remote {
-        Some(remote_opts) => create_ssh_docker_client(remote_opts).await?,
-        None => Docker::connect_with_local_defaults().into_diagnostic()?,
-    };
-    // Try to load existing metadata, fall back to creating new metadata
-    // with the default ports (the actual ports are only known at deploy time).
+    let runtime = create_runtime(remote).await?;
     let metadata = load_gateway_metadata(name)
         .unwrap_or_else(|_| create_gateway_metadata(name, remote, DEFAULT_GATEWAY_PORT));
     Ok(GatewayHandle {
         name: name.to_string(),
         metadata,
-        docker,
+        runtime,
     })
 }
 
@@ -594,10 +612,9 @@ pub async fn ensure_gateway_image(
     Ok(image_ref)
 }
 
-/// Fetch logs from the gateway Docker container.
+/// Fetch logs from the gateway container.
 ///
-/// Connects to Docker (local or remote), retrieves logs from
-/// `openshell-cluster-{name}`, and writes them to the provided writer.
+/// Uses the appropriate runtime backend based on gateway metadata.
 ///
 /// When `follow` is true, streams logs in real-time (blocks until cancelled).
 /// When `lines` is `Some(n)`, returns the last `n` lines; when `None`,
@@ -609,72 +626,32 @@ pub async fn gateway_container_logs<W: std::io::Write>(
     follow: bool,
     mut writer: W,
 ) -> Result<()> {
-    use bollard::container::LogOutput;
-    use bollard::query_parameters::LogsOptionsBuilder;
-    use futures::StreamExt;
-    use miette::WrapErr;
-
-    let docker = match remote {
-        Some(remote_opts) => create_ssh_docker_client(remote_opts).await?,
-        None => Docker::connect_with_local_defaults().into_diagnostic()?,
-    };
-
-    let container = container_name(name);
-
-    let tail_value = match (follow, lines) {
-        (true, _) => "0".to_string(),
-        (false, Some(n)) => n.to_string(),
-        (false, None) => "all".to_string(),
-    };
-
-    let options = LogsOptionsBuilder::new()
-        .follow(follow)
-        .stdout(true)
-        .stderr(true)
-        .tail(&tail_value)
-        .timestamps(true)
-        .build();
-
-    let mut stream = docker.logs(&container, Some(options));
-
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok(log) => {
-                let text = match log {
-                    LogOutput::StdOut { message }
-                    | LogOutput::StdErr { message }
-                    | LogOutput::Console { message } => {
-                        String::from_utf8_lossy(&message).to_string()
-                    }
-                    LogOutput::StdIn { .. } => continue,
-                };
-                writer
-                    .write_all(text.as_bytes())
-                    .into_diagnostic()
-                    .wrap_err("failed to write log output")?;
-            }
-            Err(err) => {
-                return Err(miette::miette!("error reading container logs: {err}"));
-            }
-        }
-    }
-
+    // Fetch all log output into a buffer and then write to the non-Send writer.
+    // This avoids requiring Send on the writer while still using the runtime.
+    let runtime = create_runtime(remote).await?;
+    let mut buf = Vec::new();
+    runtime
+        .stream_logs(name, follow, lines, &mut buf)
+        .await?;
+    writer
+        .write_all(&buf)
+        .into_diagnostic()
+        .map_err(|e| e.wrap_err("failed to write log output"))?;
     Ok(())
 }
 
 /// Fetch the last `n` lines of container logs for a local gateway as a
 /// `String`.  This is a convenience wrapper for diagnostic call sites (e.g.
-/// failure diagnosis in the CLI) that do not hold a Docker client handle.
+/// failure diagnosis in the CLI) that do not hold a runtime client handle.
 ///
-/// Returns an empty string on any Docker/connection error so callers don't
+/// Returns an empty string on any connection error so callers don't
 /// need to worry about error handling.
 pub async fn fetch_gateway_logs(name: &str, n: usize) -> String {
-    let docker = match Docker::connect_with_local_defaults() {
-        Ok(d) => d,
+    let runtime = match create_runtime(None).await {
+        Ok(r) => r,
         Err(_) => return String::new(),
     };
-    let container = container_name(name);
-    fetch_recent_logs(&docker, &container, n).await
+    runtime.fetch_recent_logs(name, n).await
 }
 
 fn default_gateway_image_ref() -> String {

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::RemoteOptions;
+use crate::container_runtime::RuntimeType;
 use crate::paths::{active_gateway_path, gateways_dir, last_sandbox_path};
 use miette::{IntoDiagnostic, Result, WrapErr};
 use openshell_core::paths::ensure_parent_dir_restricted;
@@ -45,6 +46,19 @@ pub struct GatewayMetadata {
         alias = "cf_auth_url"
     )]
     pub edge_auth_url: Option<String>,
+
+    /// The container runtime used for this gateway.
+    /// Defaults to Docker for backwards compatibility with existing metadata files.
+    #[serde(default = "default_runtime_type", skip_serializing_if = "is_docker")]
+    pub runtime_type: RuntimeType,
+}
+
+fn default_runtime_type() -> RuntimeType {
+    RuntimeType::Docker
+}
+
+fn is_docker(rt: &RuntimeType) -> bool {
+    matches!(rt, RuntimeType::Docker)
 }
 
 pub fn create_gateway_metadata(
@@ -107,6 +121,7 @@ pub fn create_gateway_metadata_with_host(
         auth_mode: None,
         edge_team_domain: None,
         edge_auth_url: None,
+        runtime_type: RuntimeType::Docker,
     }
 }
 
@@ -435,6 +450,7 @@ mod tests {
             auth_mode: None,
             edge_team_domain: None,
             edge_auth_url: None,
+            runtime_type: RuntimeType::Docker,
         };
         let json = serde_json::to_string(&meta).unwrap();
         let parsed: GatewayMetadata = serde_json::from_str(&json).unwrap();

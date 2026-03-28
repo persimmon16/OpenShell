@@ -169,6 +169,22 @@ const FAILURE_PATTERNS: &[FailurePattern] = &[
         match_mode: MatchMode::Any,
         diagnose: diagnose_docker_not_running,
     },
+    // Apple Container not running or not installed (macOS)
+    FailurePattern {
+        matchers: &[
+            "Apple Container is not running",
+            "container system info",
+            "container system start",
+        ],
+        match_mode: MatchMode::Any,
+        diagnose: diagnose_apple_container_not_running,
+    },
+    // Apple Container vmnet network failure
+    FailurePattern {
+        matchers: &["vmnet", "network interface", "virtualization framework"],
+        match_mode: MatchMode::Any,
+        diagnose: diagnose_apple_container_vmnet,
+    },
 ];
 
 fn diagnose_corrupted_state(gateway_name: &str) -> GatewayFailureDiagnosis {
@@ -409,6 +425,48 @@ fn diagnose_docker_not_running(_gateway_name: &str) -> GatewayFailureDiagnosis {
                 "If using a non-default Docker socket, set DOCKER_HOST:\n     \
                  export DOCKER_HOST=unix:///var/run/docker.sock",
             ),
+            RecoveryStep::new("Then retry: openshell gateway start"),
+        ],
+        retryable: true,
+    }
+}
+
+fn diagnose_apple_container_not_running(_gateway_name: &str) -> GatewayFailureDiagnosis {
+    GatewayFailureDiagnosis {
+        summary: "Apple Container is not running".to_string(),
+        explanation: "The Apple Container runtime is not running or not installed. \
+            OpenShell on macOS uses Apple Container for lightweight VM-based sandboxes."
+            .to_string(),
+        recovery_steps: vec![
+            RecoveryStep::with_command(
+                "Start Apple Container",
+                "container system start",
+            ),
+            RecoveryStep::new(
+                "If not installed, install Apple Container from https://github.com/apple/container",
+            ),
+            RecoveryStep::new(
+                "Requires macOS 15 (Sequoia) or later",
+            ),
+            RecoveryStep::new("Then retry: openshell gateway start"),
+        ],
+        retryable: true,
+    }
+}
+
+fn diagnose_apple_container_vmnet(_gateway_name: &str) -> GatewayFailureDiagnosis {
+    GatewayFailureDiagnosis {
+        summary: "Apple Container networking failure".to_string(),
+        explanation: "The vmnet networking framework used by Apple Container encountered \
+            an error. This can happen after macOS updates or when the Virtualization \
+            framework is in a bad state."
+            .to_string(),
+        recovery_steps: vec![
+            RecoveryStep::with_command(
+                "Restart the Apple Container service",
+                "container system stop && container system start",
+            ),
+            RecoveryStep::new("If the issue persists, restart your Mac"),
             RecoveryStep::new("Then retry: openshell gateway start"),
         ],
         retryable: true,

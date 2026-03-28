@@ -11,6 +11,15 @@ Use **only** `openshell` CLI commands (`openshell status`, `openshell doctor log
 
 ## Overview
 
+`openshell gateway start` automatically selects the container runtime:
+
+- **Linux / Remote SSH**: Docker container running k3s with OpenShell server via Helm
+- **macOS (local)**: Apple Container VM running the gateway binary directly, with a Swift bridge daemon on the host for sandbox management (no k3s, no Kubernetes)
+
+Check `runtime_type` in the gateway metadata (`~/.config/openshell/gateways/{name}/metadata.json`) to identify which path was used.
+
+### Docker + k3s Path (Linux / Remote)
+
 `openshell gateway start` creates a Docker container running k3s with the OpenShell server deployed via Helm. The deployment stages, in order, are:
 
 1. **Pre-deploy check**: `openshell gateway start` in interactive mode prompts to **reuse** (keep volume, clean stale nodes) or **recreate** (destroy everything, fresh start). `mise run cluster` always recreates before deploy.

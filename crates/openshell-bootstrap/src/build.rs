@@ -33,7 +33,7 @@ pub async fn build_and_push_image(
     context_dir: &Path,
     gateway_name: &str,
     build_args: &HashMap<String, String>,
-    on_log: &mut impl FnMut(String),
+    on_log: &mut (impl FnMut(String) + ?Sized),
 ) -> Result<()> {
     // 1. Build the image locally.
     on_log(format!(
@@ -62,12 +62,12 @@ pub async fn build_and_push_image(
 ///
 /// Creates a tar archive of `context_dir`, sends it to Docker with the
 /// specified Dockerfile path and tag, and streams build output to `on_log`.
-async fn build_image(
+pub async fn build_image(
     dockerfile_path: &Path,
     tag: &str,
     context_dir: &Path,
     build_args: &HashMap<String, String>,
-    on_log: &mut impl FnMut(String),
+    on_log: &mut (impl FnMut(String) + ?Sized),
 ) -> Result<()> {
     let docker = Docker::connect_with_local_defaults()
         .into_diagnostic()

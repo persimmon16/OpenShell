@@ -36,7 +36,7 @@ pub async fn push_local_images(
     gateway_docker: &Docker,
     container_name: &str,
     images: &[&str],
-    on_log: &mut impl FnMut(String),
+    on_log: &mut (impl FnMut(String) + ?Sized),
 ) -> Result<()> {
     if images.is_empty() {
         return Ok(());

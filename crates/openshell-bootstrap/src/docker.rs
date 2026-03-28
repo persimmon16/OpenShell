@@ -1088,6 +1088,253 @@ fn is_port_conflict(err: &BollardError) -> bool {
     )
 }
 
+// ── DockerRuntime: ContainerRuntime abstraction ──────────────────────
+
+use crate::container_runtime::{
+    ExistingGateway, GatewayContainerConfig, PortConflict as RuntimePortConflict, RuntimePreflight,
+    RuntimeType,
+};
+
+/// Docker-based container runtime backend.
+///
+/// Wraps a `bollard::Docker` client and delegates to the existing Docker
+/// functions in this module. For remote deployments, the client connects
+/// over SSH.
+pub struct DockerRuntime {
+    docker: Docker,
+}
+
+impl DockerRuntime {
+    /// Create a runtime connected to the local Docker daemon.
+    pub fn from_preflight(preflight: DockerPreflight) -> Self {
+        Self {
+            docker: preflight.docker,
+        }
+    }
+
+    /// Create a runtime from an existing Docker client (e.g., for SSH remotes).
+    pub fn from_client(docker: Docker) -> Self {
+        Self { docker }
+    }
+
+    /// Access the inner bollard Docker client (needed for k3s-specific operations).
+    pub fn docker(&self) -> &Docker {
+        &self.docker
+    }
+
+    pub async fn check_available(&self) -> Result<RuntimePreflight> {
+        let version = match self.docker.version().await {
+            Ok(v) => v.version,
+            Err(_) => None,
+        };
+        Ok(RuntimePreflight {
+            version,
+            runtime_type: RuntimeType::Docker,
+        })
+    }
+
+    pub async fn ensure_image(
+        &self,
+        image_ref: &str,
+        registry_username: Option<&str>,
+        registry_token: Option<&str>,
+    ) -> Result<()> {
+        ensure_image(&self.docker, image_ref, registry_username, registry_token).await
+    }
+
+    pub async fn pull_image(
+        &self,
+        image_ref: &str,
+        registry_username: Option<&str>,
+        registry_token: Option<&str>,
+        on_progress: impl FnMut(String) + Send + 'static,
+    ) -> Result<()> {
+        image::pull_remote_image(
+            &self.docker,
+            image_ref,
+            registry_username,
+            registry_token,
+            on_progress,
+        )
+        .await
+    }
+
+    pub async fn check_existing(&self, name: &str) -> Result<Option<ExistingGateway>> {
+        check_existing_gateway(&self.docker, name)
+            .await
+            .map(|opt| {
+                opt.map(|info| ExistingGateway {
+                    container_exists: info.container_exists,
+                    container_running: info.container_running,
+                    storage_exists: info.volume_exists,
+                    container_image: info.container_image,
+                })
+            })
+    }
+
+    pub async fn create_gateway(
+        &self,
+        name: &str,
+        config: &GatewayContainerConfig,
+    ) -> Result<()> {
+        ensure_container(
+            &self.docker,
+            name,
+            &config.image_ref,
+            &config.extra_sans,
+            config.ssh_gateway_host.as_deref(),
+            config.gateway_port,
+            config.disable_tls,
+            config.disable_gateway_auth,
+            config.registry_username.as_deref(),
+            config.registry_token.as_deref(),
+            config.gpu,
+        )
+        .await
+    }
+
+    pub async fn start_gateway(&self, name: &str) -> Result<()> {
+        start_container(&self.docker, name).await
+    }
+
+    pub async fn stop_gateway(&self, name: &str) -> Result<()> {
+        stop_container(&self.docker, &container_name(name)).await
+    }
+
+    pub async fn destroy_resources(&self, name: &str) -> Result<()> {
+        destroy_gateway_resources(&self.docker, name).await
+    }
+
+    pub async fn ensure_network(&self, name: &str) -> Result<()> {
+        ensure_network(&self.docker, &network_name(name)).await
+    }
+
+    pub async fn ensure_storage(&self, name: &str) -> Result<()> {
+        ensure_volume(&self.docker, &volume_name(name)).await
+    }
+
+    pub async fn exec_capture(&self, name: &str, cmd: Vec<String>) -> Result<(String, i64)> {
+        crate::runtime::exec_capture_with_exit(&self.docker, &container_name(name), cmd).await
+    }
+
+    pub async fn wait_for_ready(
+        &self,
+        name: &str,
+        on_log: impl FnMut(String) + Send,
+    ) -> Result<()> {
+        crate::runtime::wait_for_gateway_ready(&self.docker, name, on_log).await
+    }
+
+    pub async fn fetch_recent_logs(&self, name: &str, n: usize) -> String {
+        crate::runtime::fetch_recent_logs(&self.docker, &container_name(name), n).await
+    }
+
+    pub async fn stream_logs<W: std::io::Write + Send>(
+        &self,
+        name: &str,
+        follow: bool,
+        lines: Option<usize>,
+        mut writer: W,
+    ) -> Result<()> {
+        use bollard::container::LogOutput;
+        use bollard::query_parameters::LogsOptionsBuilder;
+
+        let container = container_name(name);
+        let tail_value = match (follow, lines) {
+            (true, _) => "0".to_string(),
+            (false, Some(n)) => n.to_string(),
+            (false, None) => "all".to_string(),
+        };
+        let options = LogsOptionsBuilder::new()
+            .follow(follow)
+            .stdout(true)
+            .stderr(true)
+            .tail(&tail_value)
+            .timestamps(true)
+            .build();
+        let mut stream = self.docker.logs(&container, Some(options));
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(log) => {
+                    let text = match log {
+                        LogOutput::StdOut { message }
+                        | LogOutput::StdErr { message }
+                        | LogOutput::Console { message } => {
+                            String::from_utf8_lossy(&message).to_string()
+                        }
+                        LogOutput::StdIn { .. } => continue,
+                    };
+                    writer
+                        .write_all(text.as_bytes())
+                        .into_diagnostic()
+                        .wrap_err("failed to write log output")?;
+                }
+                Err(err) => {
+                    return Err(miette::miette!("error reading container logs: {err}"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn push_images(
+        &self,
+        name: &str,
+        images: &[&str],
+        on_log: &mut (dyn FnMut(String) + Send),
+    ) -> Result<()> {
+        let container = container_name(name);
+        crate::push::push_local_images(&self.docker, &self.docker, &container, images, on_log)
+            .await
+    }
+
+    pub async fn check_port_conflicts(
+        &self,
+        name: &str,
+        port: u16,
+    ) -> Result<Vec<RuntimePortConflict>> {
+        check_port_conflicts(&self.docker, name, port)
+            .await
+            .map(|conflicts| {
+                conflicts
+                    .into_iter()
+                    .map(|c| RuntimePortConflict {
+                        container_name: c.container_name,
+                        host_port: c.host_port,
+                    })
+                    .collect()
+            })
+    }
+
+    pub async fn build_image(
+        &self,
+        dockerfile: &std::path::Path,
+        tag: &str,
+        context: &std::path::Path,
+        args: &HashMap<String, String>,
+        on_log: &mut (dyn FnMut(String) + Send),
+    ) -> Result<()> {
+        crate::build::build_image(dockerfile, tag, context, args, on_log).await
+    }
+
+    pub async fn build_and_push_image(
+        &self,
+        dockerfile: &std::path::Path,
+        tag: &str,
+        context: &std::path::Path,
+        gateway_name: &str,
+        args: &HashMap<String, String>,
+        on_log: &mut (dyn FnMut(String) + Send),
+    ) -> Result<()> {
+        crate::build::build_and_push_image(dockerfile, tag, context, gateway_name, args, on_log)
+            .await
+    }
+
+    pub async fn check_container_running(&self, name: &str) -> Result<()> {
+        check_container_running(&self.docker, &container_name(name)).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

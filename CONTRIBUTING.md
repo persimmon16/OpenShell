@@ -144,6 +144,31 @@ openshell --help
 openshell sandbox create -- codex
 ```
 
+### Apple Container (macOS)
+
+On macOS, OpenShell can use Apple Container instead of Docker for local development. This eliminates the need for Docker Desktop, Colima, or any Docker-compatible runtime.
+
+Requirements:
+- macOS 15 (Sequoia) or later
+- Apple Container installed (`brew install container` or from [github.com/apple/container](https://github.com/apple/container))
+
+Build and start the bridge daemon:
+
+```bash
+mise run apple:build     # Build the Swift bridge daemon
+mise run apple:start     # Start the bridge daemon (port 50052)
+openshell gateway start  # Auto-detects Apple Container
+```
+
+Available mise tasks:
+
+| Task | Description |
+|------|-------------|
+| `apple:build` | Build the Swift bridge daemon |
+| `apple:start` | Start the container bridge daemon |
+| `apple:stop` | Stop the container bridge daemon |
+| `apple:test` | Run macOS E2E tests |
+
 ### Cluster debugging helpers
 
 Two additional scripts in `scripts/bin/` provide gateway-aware wrappers for cluster debugging:

@@ -1022,6 +1022,7 @@ pub async fn gateway_add(
             auth_mode: Some("mtls".to_string()),
             edge_team_domain: None,
             edge_auth_url: None,
+            runtime_type: openshell_bootstrap::container_runtime::RuntimeType::Docker,
         };
 
         store_gateway_metadata(name, &metadata)?;
@@ -1051,6 +1052,7 @@ pub async fn gateway_add(
             auth_mode: Some("cloudflare_jwt".to_string()),
             edge_team_domain: None,
             edge_auth_url: None,
+            runtime_type: openshell_bootstrap::container_runtime::RuntimeType::Docker,
         };
 
         store_gateway_metadata(name, &metadata)?;
@@ -5069,6 +5071,7 @@ mod tests {
             auth_mode: Some("cloudflare_jwt".to_string()),
             edge_team_domain: None,
             edge_auth_url: None,
+            runtime_type: openshell_bootstrap::container_runtime::RuntimeType::Docker,
         }
     }
 
@@ -5457,6 +5460,7 @@ mod tests {
                 auth_mode: None,
                 edge_team_domain: None,
                 edge_auth_url: None,
+                runtime_type: openshell_bootstrap::container_runtime::RuntimeType::Docker,
             },
         ];
 
