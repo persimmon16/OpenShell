@@ -146,12 +146,14 @@ async fn ssh_connect(
     tokio::spawn(async move {
         match upgrade.await {
             Ok(mut upgraded) => {
+                let skip_handshake = state_clone.sandbox_backend.as_kubernetes().is_none();
                 if let Err(err) = handle_tunnel(
                     &mut upgraded,
                     connect_target,
                     &token_clone,
                     &handshake_secret,
                     &sandbox_id_clone,
+                    skip_handshake,
                 )
                 .await
                 {
@@ -177,6 +179,7 @@ async fn handle_tunnel(
     token: &str,
     secret: &str,
     sandbox_id: &str,
+    skip_handshake: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // The sandbox pod may not be network-reachable immediately after the CRD
     // reports Ready (DNS propagation, pod IP assignment, SSH server startup).
@@ -231,19 +234,25 @@ async fn handle_tunnel(
         format!("failed to connect to sandbox after retries: {err}")
     })?;
     upstream.set_nodelay(true)?;
-    info!(sandbox_id = %sandbox_id, "SSH tunnel: sending NSSH1 handshake preface");
-    let preface = build_preface(token, secret)?;
-    upstream.write_all(preface.as_bytes()).await?;
 
-    info!(sandbox_id = %sandbox_id, "SSH tunnel: waiting for handshake response");
-    let mut response = String::new();
-    read_line(&mut upstream, &mut response).await?;
-    info!(sandbox_id = %sandbox_id, response = %response.trim(), "SSH tunnel: handshake response received");
-    if response.trim() != "OK" {
-        return Err("sandbox handshake rejected".into());
+    if skip_handshake {
+        // Apple Container sandboxes use plain openssh-server without
+        // the NSSH1 handshake protocol. Connect directly.
+        info!(sandbox_id = %sandbox_id, "SSH tunnel established (direct, no NSSH1 handshake)");
+    } else {
+        info!(sandbox_id = %sandbox_id, "SSH tunnel: sending NSSH1 handshake preface");
+        let preface = build_preface(token, secret)?;
+        upstream.write_all(preface.as_bytes()).await?;
+
+        info!(sandbox_id = %sandbox_id, "SSH tunnel: waiting for handshake response");
+        let mut response = String::new();
+        read_line(&mut upstream, &mut response).await?;
+        info!(sandbox_id = %sandbox_id, response = %response.trim(), "SSH tunnel: handshake response received");
+        if response.trim() != "OK" {
+            return Err("sandbox handshake rejected".into());
+        }
+        info!(sandbox_id = %sandbox_id, "SSH tunnel established");
     }
-
-    info!(sandbox_id = %sandbox_id, "SSH tunnel established");
     let mut upgraded = TokioIo::new(upgraded);
     // Discard the result entirely – connection-close errors are expected when
     // the SSH session ends and do not represent a failure worth propagating.
