@@ -117,7 +117,21 @@ impl AppleContainerSandboxClient {
             )));
         }
 
-        info!(sandbox = %sandbox.name, "created sandbox container");
+        // Start the container.
+        let start_output = tokio::process::Command::new("container")
+            .args(["start", &container_name])
+            .output()
+            .await
+            .map_err(|e| tonic::Status::internal(format!("failed to start container: {e}")))?;
+
+        if !start_output.status.success() {
+            let stderr = String::from_utf8_lossy(&start_output.stderr);
+            return Err(tonic::Status::internal(format!(
+                "failed to start sandbox container: {stderr}"
+            )));
+        }
+
+        info!(sandbox = %sandbox.name, "created and started sandbox container");
         Ok(())
     }
 

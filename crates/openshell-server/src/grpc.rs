@@ -34,7 +34,7 @@ use openshell_core::proto::{
     WatchSandboxRequest, open_shell_server::OpenShell,
 };
 use openshell_core::proto::{
-    Sandbox, SandboxPhase, SandboxPolicy as ProtoSandboxPolicy, SandboxTemplate,
+    Sandbox, SandboxPhase, SandboxPolicy as ProtoSandboxPolicy, SandboxStatus, SandboxTemplate,
 };
 use openshell_core::settings::{self, SettingValueKind};
 use prost::Message;
@@ -234,7 +234,7 @@ impl OpenShell for OpenShellService {
         };
         let namespace = self.state.config.sandbox_namespace.clone();
 
-        let sandbox = Sandbox {
+        let mut sandbox = Sandbox {
             id: id.clone(),
             name: name.clone(),
             namespace,
@@ -272,6 +272,25 @@ impl OpenShell for OpenShellService {
         }
 
         self.state.sandbox_watch_bus.notify(&id);
+
+        // For non-Kubernetes backends, schedule a delayed transition to Ready.
+        // The CLI watch expects to see Provisioning → Ready, so we return the
+        // response (with phase=Provisioning) first, letting the CLI set up its
+        // watch, then update to Ready via a spawned task.
+        if self.state.sandbox_backend.as_kubernetes().is_none() {
+            let state = self.state.clone();
+            let ready_id = id.clone();
+            tokio::spawn(async move {
+                // Brief delay so the CLI's watch stream can subscribe first.
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if let Ok(Some(mut sb)) = state.store.get_message::<Sandbox>(&ready_id).await {
+                    sb.phase = SandboxPhase::Ready as i32;
+                    state.sandbox_index.update_from_sandbox(&sb);
+                    let _ = state.store.put_message(&sb).await;
+                    state.sandbox_watch_bus.notify(&ready_id);
+                }
+            });
+        }
 
         info!(
             sandbox_id = %id,

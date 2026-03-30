@@ -136,6 +136,9 @@ impl AppleContainerRuntime {
 
         // Build server arguments.
         let db_url = format!("sqlite://{}/openshell.db", data_dir.display());
+        let sandbox_image = std::env::var("OPENSHELL_SANDBOX_IMAGE").unwrap_or_else(|_| {
+            "ghcr.io/nvidia/openshell-community/sandboxes/base:latest".to_string()
+        });
         let mut args = vec![
             "--port".to_string(),
             config.gateway_port.to_string(),
@@ -145,6 +148,8 @@ impl AppleContainerRuntime {
             db_url,
             "--ssh-handshake-secret".to_string(),
             secret,
+            "--sandbox-image".to_string(),
+            sandbox_image,
         ];
 
         if config.disable_tls {
