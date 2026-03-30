@@ -644,16 +644,11 @@ fn default_gateway_image_ref() -> String {
     {
         return image;
     }
-    // On macOS with Apple Container, prefer the gateway-only image
-    // (no k3s). Check OPENSHELL_GATEWAY_IMAGE for a custom ref.
+    // On macOS with Apple Container, the gateway runs as a native process —
+    // no container image is needed. Return a sentinel value.
     #[cfg(target_os = "macos")]
     if crate::container_runtime::apple_container_available() {
-        if let Ok(image) = std::env::var("OPENSHELL_GATEWAY_IMAGE")
-            && !image.trim().is_empty()
-        {
-            return image;
-        }
-        return "openshell-gateway:dev".to_string();
+        return "native".to_string();
     }
     format!(
         "{}:{}",

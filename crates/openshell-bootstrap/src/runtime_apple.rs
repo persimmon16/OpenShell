@@ -3,10 +3,12 @@
 
 //! Apple Container runtime backend (macOS only).
 //!
-//! This module implements the container runtime interface using the Apple
-//! Container CLI (`container`), which manages lightweight VMs via the
-//! Virtualization.framework. Unlike Docker, there is no k3s or Kubernetes
-//! involved — sandboxes are managed directly via a Swift bridge daemon.
+//! Runs the gateway as a **native macOS process** instead of inside a
+//! container. The gateway binary (`openshell-server`) is started as a
+//! background daemon with its PID tracked in a file for lifecycle management.
+//!
+//! Sandboxes are Apple Container VMs managed directly by the gateway process
+//! via the `container` CLI. No Kubernetes, no bridge daemon.
 
 #![cfg(target_os = "macos")]
 
@@ -15,11 +17,12 @@ use crate::container_runtime::{
 };
 use miette::{IntoDiagnostic, Result, WrapErr};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Apple Container runtime backend.
 ///
-/// Uses the `container` CLI to manage containers as lightweight VMs.
+/// Manages the gateway as a native macOS process and uses Apple Container
+/// for sandbox VMs.
 pub struct AppleContainerRuntime;
 
 impl AppleContainerRuntime {
@@ -28,7 +31,6 @@ impl AppleContainerRuntime {
     }
 
     pub async fn check_available(&self) -> Result<RuntimePreflight> {
-        // Apple Container v0.10.0 uses `container system status` (not `system info`).
         let output = tokio::process::Command::new("container")
             .args(["system", "status"])
             .output()
@@ -44,7 +46,6 @@ impl AppleContainerRuntime {
             ));
         }
 
-        // Parse the table-format output. Look for "status  running".
         let stdout = String::from_utf8_lossy(&output.stdout);
         if !stdout.contains("running") {
             return Err(miette::miette!(
@@ -53,9 +54,7 @@ impl AppleContainerRuntime {
             ));
         }
 
-        // Get version from `container system version`.
         let version = self.get_version().await;
-
         Ok(RuntimePreflight {
             version,
             runtime_type: RuntimeType::AppleContainer,
@@ -69,249 +68,174 @@ impl AppleContainerRuntime {
             .await
             .ok()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        // Output: "container CLI version 0.10.0 (build: release, commit: ...)"
         stdout
             .strip_prefix("container CLI version ")
             .and_then(|s| s.split_whitespace().next())
             .map(String::from)
     }
 
+    /// No-op for native gateway — no image needed.
     pub async fn ensure_image(
         &self,
-        image_ref: &str,
+        _image_ref: &str,
         _registry_username: Option<&str>,
         _registry_token: Option<&str>,
     ) -> Result<()> {
-        // Check if image exists locally via JSON list.
-        let check = tokio::process::Command::new("container")
-            .args(["image", "list", "--format", "json"])
-            .output()
-            .await
-            .into_diagnostic()?;
-
-        if check.status.success() {
-            let stdout = String::from_utf8_lossy(&check.stdout);
-            // Parse JSON array and check `reference` field.
-            if let Ok(images) = serde_json::from_str::<Vec<serde_json::Value>>(&stdout) {
-                for img in &images {
-                    if let Some(reference) = img.get("reference").and_then(|r| r.as_str()) {
-                        if reference == image_ref {
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-        }
-
-        // Pull the image.
-        let pull = tokio::process::Command::new("container")
-            .args(["image", "pull", image_ref])
-            .output()
-            .await
-            .into_diagnostic()
-            .wrap_err("failed to pull image via Apple Container")?;
-
-        if !pull.status.success() {
-            let stderr = String::from_utf8_lossy(&pull.stderr);
-            return Err(miette::miette!(
-                "Failed to pull image '{image_ref}': {stderr}"
-            ));
-        }
-
         Ok(())
     }
 
+    /// No-op for native gateway.
     pub async fn pull_image(
         &self,
-        image_ref: &str,
-        registry_username: Option<&str>,
-        registry_token: Option<&str>,
-        mut on_progress: impl FnMut(String) + Send,
+        _image_ref: &str,
+        _registry_username: Option<&str>,
+        _registry_token: Option<&str>,
+        _on_progress: impl FnMut(String) + Send,
     ) -> Result<()> {
-        on_progress(format!("[progress] Pulling {image_ref}"));
-        self.ensure_image(image_ref, registry_username, registry_token)
-            .await?;
-        on_progress(format!("[progress] Pulled {image_ref}"));
         Ok(())
     }
 
+    /// Check if a gateway process is running by reading the PID file.
     pub async fn check_existing(&self, name: &str) -> Result<Option<ExistingGateway>> {
-        let container_name = format!("openshell-gateway-{name}");
-
-        // Apple Container v0.10.0: `container list --all --format json`
-        // Returns JSON array where each entry has:
-        //   configuration.id  — the container name (set via --name at create time)
-        //   status            — "running", "stopped", etc.
-        //   configuration.image.reference — the image ref
-        let output = tokio::process::Command::new("container")
-            .args(["list", "--all", "--format", "json"])
-            .output()
-            .await
-            .into_diagnostic()?;
-
-        if !output.status.success() {
+        let pid_path = self.pid_path(name);
+        if !pid_path.exists() {
             return Ok(None);
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let containers: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap_or_default();
+        let pid_str = std::fs::read_to_string(&pid_path).unwrap_or_default();
+        let pid: i32 = match pid_str.trim().parse() {
+            Ok(p) => p,
+            Err(_) => return Ok(None),
+        };
 
-        for c in &containers {
-            let id = c.pointer("/configuration/id").and_then(|v| v.as_str());
-            if id == Some(&container_name) {
-                let running = c
-                    .get("status")
-                    .and_then(|s| s.as_str())
-                    .is_some_and(|s| s == "running");
-                let image = c
-                    .pointer("/configuration/image/reference")
-                    .and_then(|i| i.as_str())
-                    .map(String::from);
-                return Ok(Some(ExistingGateway {
-                    container_exists: true,
-                    container_running: running,
-                    storage_exists: true,
-                    container_image: image,
-                }));
-            }
-        }
+        // Check if process is alive.
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
 
-        Ok(None)
+        Ok(Some(ExistingGateway {
+            container_exists: true,
+            container_running: alive,
+            storage_exists: self.data_dir(name).exists(),
+            container_image: Some("native".to_string()),
+        }))
     }
 
+    /// Start the gateway as a native macOS background process.
     pub async fn create_gateway(&self, name: &str, config: &GatewayContainerConfig) -> Result<()> {
-        let container_name = format!("openshell-gateway-{name}");
         let data_dir = self.data_dir(name);
         let pki_dir = self.pki_dir(name);
+        let log_dir = self.log_dir(name);
 
-        // Ensure host directories exist.
         std::fs::create_dir_all(&data_dir).into_diagnostic()?;
         std::fs::create_dir_all(&pki_dir).into_diagnostic()?;
+        std::fs::create_dir_all(&log_dir).into_diagnostic()?;
 
+        let server_bin = find_server_binary()?;
+
+        // Generate SSH handshake secret.
+        let secret = generate_secret();
+
+        // Build server arguments.
+        let db_url = format!("sqlite://{}/openshell.db", data_dir.display());
         let mut args = vec![
-            "create".to_string(),
-            "--name".to_string(),
-            container_name,
-            "-d".to_string(), // detach
-            "-p".to_string(),
-            // Gateway-only image listens on port 8080 directly (no k3s NodePort).
-            format!("127.0.0.1:{}:8080", config.gateway_port),
-            "-v".to_string(),
-            format!("{pki_dir}:/etc/openshell-tls"),
-            "-v".to_string(),
-            format!("{data_dir}:/var/openshell"),
+            "--port".to_string(),
+            config.gateway_port.to_string(),
+            "--sandbox-backend".to_string(),
+            "apple-container".to_string(),
+            "--db-url".to_string(),
+            db_url,
+            "--ssh-handshake-secret".to_string(),
+            secret,
         ];
 
-        // Environment variables.
-        let env_vars = self.build_env_vars(config);
-        for var in &env_vars {
-            args.push("-e".to_string());
-            args.push(var.clone());
+        if config.disable_tls {
+            args.push("--disable-tls".to_string());
+        }
+        if config.disable_gateway_auth {
+            args.push("--disable-gateway-auth".to_string());
         }
 
-        args.push(config.image_ref.clone());
-
-        let output = tokio::process::Command::new("container")
-            .args(&args)
-            .output()
-            .await
+        // Start the server as a background process.
+        let log_path = log_dir.join("server.log");
+        let log_file = std::fs::File::create(&log_path)
             .into_diagnostic()
-            .wrap_err("failed to create Apple Container gateway")?;
+            .wrap_err("failed to create server log file")?;
+        let err_file = log_file
+            .try_clone()
+            .into_diagnostic()
+            .wrap_err("failed to clone log file handle")?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(miette::miette!(
-                "Failed to create gateway container: {stderr}"
-            ));
-        }
+        let child = std::process::Command::new(&server_bin)
+            .args(&args)
+            .stdout(log_file)
+            .stderr(err_file)
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .into_diagnostic()
+            .wrap_err_with(|| {
+                format!(
+                    "failed to start openshell-server at {}",
+                    server_bin.display()
+                )
+            })?;
+
+        // Write PID file for lifecycle management.
+        let pid_path = self.pid_path(name);
+        std::fs::write(&pid_path, child.id().to_string())
+            .into_diagnostic()
+            .wrap_err("failed to write PID file")?;
 
         Ok(())
     }
 
-    pub async fn start_gateway(&self, name: &str) -> Result<()> {
-        let container_name = format!("openshell-gateway-{name}");
-        let output = tokio::process::Command::new("container")
-            .args(["start", &container_name])
-            .output()
-            .await
-            .into_diagnostic()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(miette::miette!(
-                "Failed to start gateway container: {stderr}"
-            ));
-        }
+    /// No-op — create_gateway already starts the process.
+    pub async fn start_gateway(&self, _name: &str) -> Result<()> {
         Ok(())
     }
 
+    /// Stop the gateway process via SIGTERM.
     pub async fn stop_gateway(&self, name: &str) -> Result<()> {
-        let container_name = format!("openshell-gateway-{name}");
-        let _ = tokio::process::Command::new("container")
-            .args(["stop", &container_name])
-            .output()
-            .await;
+        if let Some(pid) = self.read_pid(name) {
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
+            // Wait briefly for graceful shutdown.
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
         Ok(())
     }
 
+    /// Stop the gateway and clean up all data.
     pub async fn destroy_resources(&self, name: &str) -> Result<()> {
-        let container_name = format!("openshell-gateway-{name}");
+        self.stop_gateway(name).await?;
 
-        // Stop and remove the container.
-        let _ = tokio::process::Command::new("container")
-            .args(["stop", &container_name])
-            .output()
-            .await;
-        let _ = tokio::process::Command::new("container")
-            .args(["delete", &container_name])
-            .output()
-            .await;
-
-        // Clean up host data directories.
-        let data_dir = self.data_dir(name);
-        let pki_dir = self.pki_dir(name);
-        let _ = std::fs::remove_dir_all(&data_dir);
-        let _ = std::fs::remove_dir_all(&pki_dir);
+        let _ = std::fs::remove_file(self.pid_path(name));
+        let _ = std::fs::remove_dir_all(self.data_dir(name));
+        let _ = std::fs::remove_dir_all(self.pki_dir(name));
+        let _ = std::fs::remove_dir_all(self.log_dir(name));
 
         Ok(())
     }
 
+    /// No-op — native process uses host networking.
     pub async fn ensure_network(&self, _name: &str) -> Result<()> {
-        // Apple Container uses vmnet framework — no explicit network creation needed.
         Ok(())
     }
 
     pub async fn ensure_storage(&self, name: &str) -> Result<()> {
-        let data_dir = self.data_dir(name);
-        std::fs::create_dir_all(&data_dir)
+        std::fs::create_dir_all(self.data_dir(name))
             .into_diagnostic()
             .wrap_err("failed to create data directory")?;
         Ok(())
     }
 
-    pub async fn exec_capture(&self, name: &str, cmd: Vec<String>) -> Result<(String, i64)> {
-        let container_name = format!("openshell-gateway-{name}");
-        let mut args = vec!["exec".to_string(), container_name];
-        args.extend(cmd);
-
-        let output = tokio::process::Command::new("container")
-            .args(&args)
-            .output()
-            .await
-            .into_diagnostic()?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let combined = if stderr.is_empty() {
-            stdout
-        } else {
-            format!("{stdout}{stderr}")
-        };
-
-        let exit_code = output.status.code().map_or(1, |c| c as i64);
-        Ok((combined, exit_code))
+    /// Execute a command — not applicable for native process.
+    pub async fn exec_capture(&self, _name: &str, _cmd: Vec<String>) -> Result<(String, i64)> {
+        Err(miette::miette!(
+            "exec is not supported for native gateway process"
+        ))
     }
 
+    /// Wait for the gateway to become ready via TCP probe.
     pub async fn wait_for_ready(
         &self,
         name: &str,
@@ -321,99 +245,88 @@ impl AppleContainerRuntime {
             .unwrap_or_else(|| crate::metadata::create_gateway_metadata(name, None, 8080));
 
         let endpoint = &metadata.gateway_endpoint;
-        let attempts = 90; // 3 minutes at 2s intervals
+        let port = metadata.gateway_port;
+        let attempts = 30; // 30 seconds at 1s intervals (native process starts fast)
 
         for attempt in 0..attempts {
-            if attempt > 0 && attempt % 10 == 0 {
+            if attempt > 0 && attempt % 5 == 0 {
                 on_log(format!(
-                    "[progress] Waiting for gateway to become ready ({attempt}/{attempts})"
+                    "[progress] Waiting for gateway ({attempt}/{attempts})"
                 ));
+
+                // Check if process is still alive.
+                if let Some(pid) = self.read_pid(name) {
+                    if unsafe { libc::kill(pid, 0) } != 0 {
+                        // Process died — read log for diagnostics.
+                        let log_path = self.log_dir(name).join("server.log");
+                        let log_tail = std::fs::read_to_string(&log_path)
+                            .unwrap_or_default()
+                            .lines()
+                            .rev()
+                            .take(10)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        return Err(miette::miette!(
+                            "Gateway process exited unexpectedly.\n\nServer log:\n{log_tail}"
+                        ));
+                    }
+                }
             }
 
-            let port = metadata.gateway_port;
             match tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await {
                 Ok(_) => {
                     on_log("[progress] Gateway is ready".to_string());
                     return Ok(());
                 }
                 Err(_) => {
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
             }
         }
 
         Err(miette::miette!(
-            "Timed out waiting for gateway to become ready at {endpoint}"
+            "Timed out waiting for gateway at {endpoint}"
         ))
     }
 
+    /// Read recent lines from the server log file.
     pub async fn fetch_recent_logs(&self, name: &str, n: usize) -> String {
-        let container_name = format!("openshell-gateway-{name}");
-        // Apple Container v0.10.0 uses `-n` not `--tail`.
-        let output = tokio::process::Command::new("container")
-            .args(["logs", "-n", &n.to_string(), &container_name])
-            .output()
-            .await;
-
-        match output {
-            Ok(out) => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                if stdout.is_empty() && stderr.is_empty() {
-                    "container logs: none available".to_string()
-                } else {
-                    format!("container logs:\n  {stdout}{stderr}")
-                }
+        let log_path = self.log_dir(name).join("server.log");
+        match std::fs::read_to_string(&log_path) {
+            Ok(content) => {
+                let lines: Vec<&str> = content.lines().collect();
+                let start = lines.len().saturating_sub(n);
+                lines[start..].join("\n")
             }
-            Err(_) => "container logs: failed to fetch".to_string(),
+            Err(_) => "server logs: not available".to_string(),
         }
     }
 
     pub async fn stream_logs<W: std::io::Write + Send>(
         &self,
         name: &str,
-        follow: bool,
+        _follow: bool,
         lines: Option<usize>,
         mut writer: W,
     ) -> Result<()> {
-        let container_name = format!("openshell-gateway-{name}");
-        let mut args = vec!["logs".to_string()];
-        if follow {
-            args.push("-f".to_string());
-        }
-        if let Some(n) = lines {
-            // Apple Container v0.10.0 uses `-n` not `--tail`.
-            args.push("-n".to_string());
-            args.push(n.to_string());
-        }
-        args.push(container_name);
-
-        let output = tokio::process::Command::new("container")
-            .args(&args)
-            .output()
-            .await
-            .into_diagnostic()?;
-
+        let content = self.fetch_recent_logs(name, lines.unwrap_or(100)).await;
         writer
-            .write_all(&output.stdout)
+            .write_all(content.as_bytes())
             .into_diagnostic()
             .wrap_err("failed to write log output")?;
-        writer
-            .write_all(&output.stderr)
-            .into_diagnostic()
-            .wrap_err("failed to write log output")?;
-
         Ok(())
     }
 
+    /// No-op — native process doesn't need image pushing.
     pub async fn push_images(
         &self,
         _name: &str,
         _images: &[&str],
         _on_log: &mut (dyn FnMut(String) + Send),
     ) -> Result<()> {
-        // No-op on macOS: images are available locally on the host and the
-        // bridge daemon creates sandbox containers from them directly.
         Ok(())
     }
 
@@ -446,7 +359,6 @@ impl AppleContainerRuntime {
             "Building image {tag} from {}",
             dockerfile.display()
         ));
-
         let mut cmd_args = vec![
             "build".to_string(),
             "-t".to_string(),
@@ -454,12 +366,10 @@ impl AppleContainerRuntime {
             "-f".to_string(),
             dockerfile.to_string_lossy().to_string(),
         ];
-
         for (key, value) in args {
             cmd_args.push("--build-arg".to_string());
             cmd_args.push(format!("{key}={value}"));
         }
-
         cmd_args.push(context.to_string_lossy().to_string());
 
         let output = tokio::process::Command::new("container")
@@ -473,7 +383,6 @@ impl AppleContainerRuntime {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(miette::miette!("Image build failed: {stderr}"));
         }
-
         on_log(format!("Built image {tag}"));
         Ok(())
     }
@@ -487,62 +396,101 @@ impl AppleContainerRuntime {
         args: &HashMap<String, String>,
         on_log: &mut (dyn FnMut(String) + Send),
     ) -> Result<()> {
-        // On Apple Container, build locally — images are shared via the host.
         self.build_image(dockerfile, tag, context, args, on_log)
             .await
     }
 
     pub async fn check_container_running(&self, name: &str) -> Result<()> {
-        let existing = self.check_existing(name).await?;
-        match existing {
-            Some(info) if info.container_running => Ok(()),
-            Some(_) => Err(miette::miette!("gateway container is not running")),
-            None => Err(miette::miette!("gateway container does not exist")),
+        if let Some(pid) = self.read_pid(name) {
+            if unsafe { libc::kill(pid, 0) } == 0 {
+                return Ok(());
+            }
         }
+        Err(miette::miette!("gateway process is not running"))
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────
+    // ── Path helpers ────────────────────────────────────────────────
 
-    fn data_dir(&self, name: &str) -> String {
+    fn gateway_dir(&self, name: &str) -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        format!("{home}/.openshell/gateways/{name}/data")
+        PathBuf::from(format!("{home}/.openshell/gateways/{name}"))
     }
 
-    fn pki_dir(&self, name: &str) -> String {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        format!("{home}/.openshell/gateways/{name}/pki")
+    fn data_dir(&self, name: &str) -> PathBuf {
+        self.gateway_dir(name).join("data")
     }
 
-    fn build_env_vars(&self, config: &GatewayContainerConfig) -> Vec<String> {
-        // The gateway-only image runs openshell-server directly with OPENSHELL_* env vars.
-        // Generate a random handshake secret for the SSH tunnel HMAC.
-        use std::io::Read;
-        let mut bytes = [0u8; 32];
-        std::fs::File::open("/dev/urandom")
-            .and_then(|mut f| f.read_exact(&mut bytes))
-            .unwrap_or_default();
-        let secret: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-
-        let mut env = vec![
-            "OPENSHELL_SANDBOX_BACKEND=apple-container".to_string(),
-            "OPENSHELL_DB_URL=sqlite:///var/openshell/openshell.db".to_string(),
-            format!("OPENSHELL_SSH_HANDSHAKE_SECRET={secret}"),
-        ];
-
-        if config.disable_tls {
-            env.push("OPENSHELL_DISABLE_TLS=true".to_string());
-        }
-        if config.disable_gateway_auth {
-            env.push("OPENSHELL_DISABLE_GATEWAY_AUTH=true".to_string());
-        }
-        if let Some(ref host) = config.ssh_gateway_host {
-            env.push(format!("OPENSHELL_SSH_GATEWAY_HOST={host}"));
-            env.push(format!(
-                "OPENSHELL_SSH_GATEWAY_PORT={}",
-                config.gateway_port
-            ));
-        }
-
-        env
+    fn pki_dir(&self, name: &str) -> PathBuf {
+        self.gateway_dir(name).join("pki")
     }
+
+    fn log_dir(&self, name: &str) -> PathBuf {
+        self.gateway_dir(name).join("logs")
+    }
+
+    fn pid_path(&self, name: &str) -> PathBuf {
+        self.gateway_dir(name).join("gateway.pid")
+    }
+
+    fn read_pid(&self, name: &str) -> Option<i32> {
+        std::fs::read_to_string(self.pid_path(name))
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+    }
+}
+
+/// Find the `openshell-server` binary.
+///
+/// Search order:
+/// 1. `OPENSHELL_SERVER_BIN` env var
+/// 2. Same directory as the current executable
+/// 3. PATH
+fn find_server_binary() -> Result<PathBuf> {
+    // Check env var first.
+    if let Ok(bin) = std::env::var("OPENSHELL_SERVER_BIN") {
+        let path = PathBuf::from(&bin);
+        if path.exists() {
+            return Ok(path);
+        }
+        return Err(miette::miette!("OPENSHELL_SERVER_BIN={bin} does not exist"));
+    }
+
+    // Check next to current executable.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("openshell-server");
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    // Check PATH.
+    if let Ok(output) = std::process::Command::new("which")
+        .arg("openshell-server")
+        .output()
+    {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return Ok(PathBuf::from(path));
+            }
+        }
+    }
+
+    Err(miette::miette!(
+        "Could not find openshell-server binary.\n\
+         Build it with: cargo build --release -p openshell-server\n\
+         Or set OPENSHELL_SERVER_BIN to point to it."
+    ))
+}
+
+/// Generate a random hex secret for SSH handshake HMAC.
+fn generate_secret() -> String {
+    use std::io::Read;
+    let mut bytes = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .unwrap_or_default();
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

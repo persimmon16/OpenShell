@@ -15,6 +15,7 @@ base64 = "0.22"
 bollard = { version = "0.20", features = ["ssh"] }
 bytes = { workspace = true }
 futures = { workspace = true }
+libc = "0.2"
 miette = { workspace = true }
 rcgen = { workspace = true }
 serde = { workspace = true }
