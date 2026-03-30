@@ -35,8 +35,7 @@ pub use grpc::OpenShellService;
 pub use http::{health_router, http_router};
 pub use multiplex::{MultiplexService, MultiplexedService};
 use persistence::Store;
-use sandbox::bridge_client::BridgeClient;
-use sandbox::{SandboxClient, spawn_sandbox_watcher, spawn_store_reconciler};
+use sandbox::{SandboxBackend, SandboxClient, spawn_sandbox_watcher, spawn_store_reconciler};
 use sandbox_index::SandboxIndex;
 use sandbox_watch::{SandboxWatchBus, spawn_kube_event_tailer};
 pub use tls::TlsAcceptor;
@@ -51,8 +50,8 @@ pub struct ServerState {
     /// Persistence store.
     pub store: Arc<Store>,
 
-    /// Kubernetes sandbox client.
-    pub sandbox_client: SandboxClient,
+    /// Sandbox backend — Kubernetes or Apple Container.
+    pub sandbox_backend: SandboxBackend,
 
     /// In-memory sandbox correlation index.
     pub sandbox_index: SandboxIndex,
@@ -74,11 +73,6 @@ pub struct ServerState {
     /// set/delete operation, including the precedence check on sandbox
     /// mutations that reads global state.
     pub settings_mutex: tokio::sync::Mutex<()>,
-
-    /// Container bridge daemon client (Apple Container backend).
-    /// Present only when `sandbox_backend` is `"apple-container"`.
-    /// Authenticated via mutual TLS using the OpenShell PKI.
-    pub bridge_client: Option<BridgeClient>,
 }
 
 /// Listen for shutdown signals (SIGTERM/SIGINT on Unix, Ctrl-C on others).
@@ -133,23 +127,21 @@ impl ServerState {
     pub fn new(
         config: Config,
         store: Arc<Store>,
-        sandbox_client: SandboxClient,
+        sandbox_backend: SandboxBackend,
         sandbox_index: SandboxIndex,
         sandbox_watch_bus: SandboxWatchBus,
         tracing_log_bus: TracingLogBus,
-        bridge_client: Option<BridgeClient>,
     ) -> Self {
         Self {
             config,
             store,
-            sandbox_client,
+            sandbox_backend,
             sandbox_index,
             sandbox_watch_bus,
             tracing_log_bus,
             ssh_connections_by_token: Mutex::new(HashMap::new()),
             ssh_connections_by_sandbox: Mutex::new(HashMap::new()),
             settings_mutex: tokio::sync::Mutex::new(()),
-            bridge_client,
         }
     }
 }
@@ -192,34 +184,18 @@ pub async fn run_server(config: Config, tracing_log_bus: TracingLogBus) -> Resul
 
     let store = Store::connect(database_url).await?;
 
-    // Connect to the container bridge daemon when using the apple-container backend.
-    let bridge_client = if is_apple_container {
-        if !config.bridge_endpoint.is_empty() {
-            let client = if let Some(ref bridge_tls) = config.bridge_tls {
-                BridgeClient::connect(&config.bridge_endpoint, bridge_tls).await?
-            } else {
-                BridgeClient::connect_insecure(&config.bridge_endpoint).await?
-            };
-            Some(client)
-        } else {
-            info!(
-                "Apple Container backend: no bridge endpoint configured, sandbox management disabled"
-            );
-            None
-        }
+    // Initialize the sandbox backend based on the configured sandbox_backend.
+    let sandbox_backend = if is_apple_container {
+        info!("Initializing Apple Container sandbox backend");
+        SandboxBackend::AppleContainer(sandbox::apple_container::AppleContainerSandboxClient::new(
+            config.sandbox_image.clone(),
+            config.grpc_endpoint.clone(),
+            format!("0.0.0.0:{}", config.sandbox_ssh_port),
+            config.ssh_handshake_secret.clone(),
+            config.ssh_handshake_skew_secs,
+        ))
     } else {
-        None
-    };
-
-    // Initialize the Kubernetes sandbox client only when using the k8s backend.
-    // The apple-container backend manages sandboxes via the bridge daemon instead.
-    let sandbox_client = if is_apple_container {
-        // Create a placeholder client for the apple-container backend.
-        // Sandbox operations will go through the bridge client.
-        info!("Apple Container backend: skipping Kubernetes client initialization");
-        SandboxClient::new_disconnected()
-    } else {
-        SandboxClient::new(
+        let sandbox_client = SandboxClient::new(
             config.sandbox_namespace.clone(),
             config.sandbox_image.clone(),
             config.sandbox_image_pull_policy.clone(),
@@ -231,7 +207,8 @@ pub async fn run_server(config: Config, tracing_log_bus: TracingLogBus) -> Resul
             config.host_gateway_ip.clone(),
         )
         .await
-        .map_err(|e| Error::execution(format!("failed to create kubernetes client: {e}")))?
+        .map_err(|e| Error::execution(format!("failed to create kubernetes client: {e}")))?;
+        SandboxBackend::Kubernetes(sandbox_client)
     };
     let store = Arc::new(store);
 
@@ -240,25 +217,24 @@ pub async fn run_server(config: Config, tracing_log_bus: TracingLogBus) -> Resul
     let state = Arc::new(ServerState::new(
         config.clone(),
         store.clone(),
-        sandbox_client,
+        sandbox_backend,
         sandbox_index,
         sandbox_watch_bus,
         tracing_log_bus,
-        bridge_client,
     ));
 
-    // Kubernetes-specific background tasks (skip for apple-container backend).
-    if !is_apple_container {
+    // Kubernetes-specific background tasks (only run on k8s backend).
+    if let Some(k8s_client) = state.sandbox_backend.as_kubernetes() {
         spawn_sandbox_watcher(
             store.clone(),
-            state.sandbox_client.clone(),
+            k8s_client.clone(),
             state.sandbox_index.clone(),
             state.sandbox_watch_bus.clone(),
             state.tracing_log_bus.clone(),
         );
         spawn_store_reconciler(
             store.clone(),
-            state.sandbox_client.clone(),
+            k8s_client.clone(),
             state.sandbox_index.clone(),
             state.sandbox_watch_bus.clone(),
             state.tracing_log_bus.clone(),

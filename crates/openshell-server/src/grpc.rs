@@ -205,12 +205,12 @@ impl OpenShell for OpenShellService {
         let mut spec = spec;
         let template = spec.template.get_or_insert_with(SandboxTemplate::default);
         if template.image.is_empty() {
-            template.image = self.state.sandbox_client.default_image().to_string();
+            template.image = self.state.sandbox_backend.default_image().to_string();
         }
 
         if spec.gpu {
             self.state
-                .sandbox_client
+                .sandbox_backend
                 .validate_gpu_support()
                 .await
                 .map_err(|status| {
@@ -257,35 +257,18 @@ impl OpenShell for OpenShellService {
             .await
             .map_err(|e| Status::internal(format!("persist sandbox failed: {e}")))?;
 
-        // Now create the Kubernetes resource.  If this fails, clean up
+        // Create the sandbox via the backend. If this fails, clean up
         // the store entry to avoid orphans.
-        match self.state.sandbox_client.create(&sandbox).await {
-            Ok(_) => {}
-            Err(kube::Error::Api(err)) if err.code == 409 => {
-                // Clean up the store entry we just wrote.
-                let _ = self.state.store.delete("sandbox", &id).await;
-                self.state.sandbox_index.remove_sandbox(&id);
-                warn!(
-                    sandbox_id = %id,
-                    sandbox_name = %name,
-                    "Sandbox already exists in Kubernetes"
-                );
-                return Err(Status::already_exists("sandbox already exists"));
-            }
-            Err(err) => {
-                // Clean up the store entry we just wrote.
-                let _ = self.state.store.delete("sandbox", &id).await;
-                self.state.sandbox_index.remove_sandbox(&id);
-                warn!(
-                    sandbox_id = %id,
-                    sandbox_name = %name,
-                    error = %err,
-                    "CreateSandbox request failed"
-                );
-                return Err(Status::internal(format!(
-                    "create sandbox in kubernetes failed: {err}"
-                )));
-            }
+        if let Err(status) = self.state.sandbox_backend.create(&sandbox).await {
+            let _ = self.state.store.delete("sandbox", &id).await;
+            self.state.sandbox_index.remove_sandbox(&id);
+            warn!(
+                sandbox_id = %id,
+                sandbox_name = %name,
+                error = %status,
+                "CreateSandbox request failed"
+            );
+            return Err(status);
         }
 
         self.state.sandbox_watch_bus.notify(&id);
@@ -655,18 +638,16 @@ impl OpenShell for OpenShellService {
             );
         }
 
-        let deleted = match self.state.sandbox_client.delete(&sandbox.name).await {
+        let deleted = match self.state.sandbox_backend.delete(&sandbox.name).await {
             Ok(deleted) => deleted,
-            Err(err) => {
+            Err(status) => {
                 warn!(
                     sandbox_id = %id,
                     sandbox_name = %sandbox.name,
-                    error = %err,
+                    error = %status,
                     "DeleteSandbox request failed"
                 );
-                return Err(Status::internal(format!(
-                    "delete sandbox in kubernetes failed: {err}"
-                )));
+                return Err(status);
             }
         };
 
@@ -3417,23 +3398,16 @@ async fn resolve_sandbox_exec_target(
     state: &ServerState,
     sandbox: &Sandbox,
 ) -> Result<(String, u16), Status> {
-    if let Some(status) = sandbox.status.as_ref()
-        && !status.agent_pod.is_empty()
-    {
-        match state.sandbox_client.agent_pod_ip(&status.agent_pod).await {
-            Ok(Some(ip)) => {
-                return Ok((ip.to_string(), state.config.sandbox_ssh_port));
-            }
-            Ok(None) => {
-                return Err(Status::failed_precondition(
-                    "sandbox agent pod IP is not available",
-                ));
-            }
-            Err(err) => {
-                return Err(Status::internal(format!(
-                    "failed to resolve agent pod IP: {err}"
-                )));
-            }
+    // Try resolving the sandbox IP via the backend.
+    match state.sandbox_backend.sandbox_ip(sandbox).await {
+        Ok(Some(ip)) => {
+            return Ok((ip.to_string(), state.config.sandbox_ssh_port));
+        }
+        Ok(None) => {
+            // Fall through to DNS/name-based resolution.
+        }
+        Err(err) => {
+            return Err(err);
         }
     }
 
@@ -3441,6 +3415,7 @@ async fn resolve_sandbox_exec_target(
         return Err(Status::failed_precondition("sandbox has no name"));
     }
 
+    // Kubernetes DNS fallback.
     Ok((
         format!(
             "{}.{}.svc.cluster.local",

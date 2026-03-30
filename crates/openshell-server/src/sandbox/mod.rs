@@ -5,9 +5,10 @@
 //!
 //! Supports two backends:
 //! - **Kubernetes** (default): manages sandboxes as Kubernetes pods via kube-rs.
-//! - **Apple Container** (macOS): manages sandboxes via the container bridge
-//!   daemon, authenticated with mutual TLS.
+//! - **Apple Container** (macOS): manages sandboxes as Apple Container VMs
+//!   via the `container` CLI, called directly from the gateway process.
 
+pub mod apple_container;
 pub mod bridge_client;
 
 use crate::persistence::{ObjectId, ObjectName, ObjectType, Store};
@@ -1837,5 +1838,109 @@ mod tests {
             256, // 0o400
             "TLS secret volume must use mode 0400 to prevent sandbox user from reading the private key"
         );
+    }
+}
+
+// ── SandboxBackend: unified dispatch ────────────────────────────────
+
+use apple_container::AppleContainerSandboxClient;
+
+/// Backend-agnostic sandbox manager.
+///
+/// The gRPC handlers use this enum so the same handler code works for both
+/// Kubernetes and Apple Container backends.
+#[derive(Clone, Debug)]
+pub enum SandboxBackend {
+    Kubernetes(SandboxClient),
+    AppleContainer(AppleContainerSandboxClient),
+}
+
+impl SandboxBackend {
+    pub fn default_image(&self) -> &str {
+        match self {
+            Self::Kubernetes(c) => c.default_image(),
+            Self::AppleContainer(c) => c.default_image(),
+        }
+    }
+
+    pub fn ssh_handshake_secret(&self) -> &str {
+        match self {
+            Self::Kubernetes(c) => c.ssh_handshake_secret(),
+            Self::AppleContainer(c) => c.ssh_handshake_secret(),
+        }
+    }
+
+    pub const fn ssh_handshake_skew_secs(&self) -> u64 {
+        match self {
+            Self::Kubernetes(c) => c.ssh_handshake_skew_secs(),
+            Self::AppleContainer(c) => c.ssh_handshake_skew_secs(),
+        }
+    }
+
+    pub fn ssh_listen_addr(&self) -> &str {
+        match self {
+            Self::Kubernetes(c) => c.ssh_listen_addr(),
+            Self::AppleContainer(c) => c.ssh_listen_addr(),
+        }
+    }
+
+    /// Validate GPU support. Apple Container does not support GPU passthrough.
+    pub async fn validate_gpu_support(&self) -> Result<(), tonic::Status> {
+        match self {
+            Self::Kubernetes(c) => c.validate_gpu_support().await,
+            Self::AppleContainer(_) => Err(tonic::Status::unimplemented(
+                "GPU support is not available with the Apple Container backend",
+            )),
+        }
+    }
+
+    /// Create a sandbox. Returns Ok(()) on success or a tonic::Status error.
+    pub async fn create(&self, sandbox: &Sandbox) -> Result<(), tonic::Status> {
+        match self {
+            Self::Kubernetes(c) => c.create(sandbox).await.map(|_| ()).map_err(|e| match &e {
+                KubeError::Api(api_err) if api_err.code == 409 => {
+                    tonic::Status::already_exists("sandbox already exists")
+                }
+                _ => tonic::Status::internal(format!("create sandbox in kubernetes failed: {e}")),
+            }),
+            Self::AppleContainer(c) => c.create(sandbox).await,
+        }
+    }
+
+    /// Delete a sandbox. Returns true if deleted, false if not found.
+    pub async fn delete(&self, name: &str) -> Result<bool, tonic::Status> {
+        match self {
+            Self::Kubernetes(c) => c.delete(name).await.map_err(|e| {
+                tonic::Status::internal(format!("delete sandbox in kubernetes failed: {e}"))
+            }),
+            Self::AppleContainer(c) => c.delete(name).await,
+        }
+    }
+
+    /// Resolve the IP address of a sandbox for SSH tunnelling.
+    pub async fn sandbox_ip(&self, sandbox: &Sandbox) -> Result<Option<IpAddr>, tonic::Status> {
+        match self {
+            Self::Kubernetes(c) => {
+                // Try agent pod IP first, then fall back to k8s service DNS.
+                if let Some(status) = sandbox.status.as_ref()
+                    && !status.agent_pod.is_empty()
+                {
+                    c.agent_pod_ip(&status.agent_pod).await.map_err(|e| {
+                        tonic::Status::internal(format!("failed to resolve agent pod IP: {e}"))
+                    })
+                } else {
+                    Ok(None) // Caller falls back to DNS name.
+                }
+            }
+            Self::AppleContainer(c) => c.sandbox_ip(&sandbox.name).await,
+        }
+    }
+
+    /// Get the Kubernetes SandboxClient, if this is the k8s backend.
+    pub fn as_kubernetes(&self) -> Option<&SandboxClient> {
+        match self {
+            Self::Kubernetes(c) => Some(c),
+            _ => None,
+        }
     }
 }
