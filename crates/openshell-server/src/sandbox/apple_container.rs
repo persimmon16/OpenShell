@@ -81,11 +81,16 @@ impl AppleContainerSandboxClient {
         self.ensure_image(&image).await?;
 
         // Build the create command.
+        // Override entrypoint to `sleep infinity` so the VM stays alive.
+        // The base sandbox image's default entrypoint (/bin/bash) exits
+        // immediately without a TTY.
         let mut args = vec![
             "create".to_string(),
             "--name".to_string(),
             container_name.clone(),
             "-d".to_string(),
+            "--entrypoint".to_string(),
+            "/bin/sh".to_string(),
         ];
 
         // Environment variables for the sandbox.
@@ -96,6 +101,9 @@ impl AppleContainerSandboxClient {
         }
 
         args.push(image.clone());
+        // Arguments to the entrypoint: keep the container alive.
+        args.push("-c".to_string());
+        args.push("exec sleep infinity".to_string());
 
         debug!(sandbox = %sandbox.name, image = %image, "creating sandbox container");
         let output = tokio::process::Command::new("container")
@@ -106,7 +114,6 @@ impl AppleContainerSandboxClient {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            // Check for name conflict (container already exists).
             if stderr.contains("already exists") || stderr.contains("already in use") {
                 return Err(tonic::Status::already_exists(format!(
                     "sandbox container '{container_name}' already exists"
@@ -118,20 +125,18 @@ impl AppleContainerSandboxClient {
         }
 
         // Start the container.
-        let start_output = tokio::process::Command::new("container")
-            .args(["start", &container_name])
-            .output()
-            .await
-            .map_err(|e| tonic::Status::internal(format!("failed to start container: {e}")))?;
+        self.run_container_cmd(&["start", &container_name]).await?;
 
-        if !start_output.status.success() {
-            let stderr = String::from_utf8_lossy(&start_output.stderr);
-            return Err(tonic::Status::internal(format!(
-                "failed to start sandbox container: {stderr}"
-            )));
-        }
+        // Wait for the VM to boot and get a network interface.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-        info!(sandbox = %sandbox.name, "created and started sandbox container");
+        // Bootstrap SSH inside the container so the CLI can connect.
+        // The base sandbox image doesn't include sshd — it's normally
+        // injected by the Kubernetes operator as a sidecar.
+        info!(sandbox = %sandbox.name, "bootstrapping SSH in sandbox");
+        self.bootstrap_ssh(&container_name).await?;
+
+        info!(sandbox = %sandbox.name, "sandbox container ready");
         Ok(())
     }
 
@@ -281,6 +286,80 @@ impl AppleContainerSandboxClient {
         serde_json::from_str(&stdout).map_err(|e| {
             tonic::Status::internal(format!("failed to parse container list JSON: {e}"))
         })
+    }
+
+    /// Run a simple container CLI command and check for success.
+    async fn run_container_cmd(&self, args: &[&str]) -> Result<(), tonic::Status> {
+        let output = tokio::process::Command::new("container")
+            .args(args)
+            .output()
+            .await
+            .map_err(|e| tonic::Status::internal(format!("failed to run container CLI: {e}")))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(tonic::Status::internal(format!(
+                "container command failed: {stderr}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Run a command inside the container as root.
+    async fn exec_as_root(
+        &self,
+        container_name: &str,
+        script: &str,
+    ) -> Result<String, tonic::Status> {
+        let output = tokio::process::Command::new("container")
+            .args(["exec", "--uid", "0", container_name, "sh", "-c", script])
+            .output()
+            .await
+            .map_err(|e| tonic::Status::internal(format!("container exec failed: {e}")))?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            return Err(tonic::Status::internal(format!(
+                "exec in container failed: {stderr}"
+            )));
+        }
+        Ok(if stderr.is_empty() {
+            stdout
+        } else {
+            format!("{stdout}{stderr}")
+        })
+    }
+
+    /// Bootstrap SSH server inside a sandbox container.
+    ///
+    /// The base sandbox image doesn't include openssh-server — in k8s, the
+    /// SSH server is injected by the operator. For Apple Container, we install
+    /// and configure it via `container exec`.
+    async fn bootstrap_ssh(&self, container_name: &str) -> Result<(), tonic::Status> {
+        // Install openssh-server.
+        self.exec_as_root(
+            container_name,
+            "DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 && \
+             apt-get install -y -qq openssh-server >/dev/null 2>&1",
+        )
+        .await
+        .map_err(|e| tonic::Status::internal(format!("failed to install openssh-server: {e}")))?;
+
+        // Configure and start sshd on port 2222 (matches sandbox_ssh_port default).
+        self.exec_as_root(
+            container_name,
+            "mkdir -p /run/sshd && \
+             ssh-keygen -A 2>/dev/null && \
+             sed -i 's/#Port 22/Port 2222/' /etc/ssh/sshd_config && \
+             sed -i 's/#PermitEmptyPasswords no/PermitEmptyPasswords yes/' /etc/ssh/sshd_config && \
+             sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
+             passwd -d sandbox >/dev/null 2>&1 && \
+             /usr/sbin/sshd -p 2222",
+        )
+        .await
+        .map_err(|e| tonic::Status::internal(format!("failed to start sshd: {e}")))?;
+
+        debug!(container = %container_name, "SSH server started");
+        Ok(())
     }
 
     fn sandbox_env_vars(&self, sandbox: &Sandbox, spec: &SandboxSpec) -> Vec<(String, String)> {
