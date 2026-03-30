@@ -174,15 +174,15 @@ pub async fn run_server(config: Config, tracing_log_bus: TracingLogBus) -> Resul
 
     let is_apple_container = config.sandbox_backend == "apple-container";
 
-    // Validate bridge configuration when using the apple-container backend.
+    // Log bridge configuration status when using the apple-container backend.
     if is_apple_container {
         if config.bridge_endpoint.is_empty() {
-            return Err(Error::config(
-                "bridge_endpoint is required when sandbox_backend is 'apple-container'. \
-                 Set --bridge-endpoint or OPENSHELL_BRIDGE_ENDPOINT",
-            ));
-        }
-        if config.bridge_tls.is_none() {
+            info!(
+                "Apple Container backend: no bridge endpoint configured. \
+                 Sandbox create/delete operations will not be available until \
+                 the bridge daemon is running and --bridge-endpoint is set."
+            );
+        } else if config.bridge_tls.is_none() {
             info!(
                 "Bridge mTLS not configured — connecting to bridge daemon without authentication. \
                  Set --bridge-tls-ca, --bridge-tls-cert, and --bridge-tls-key for production use."
@@ -194,29 +194,45 @@ pub async fn run_server(config: Config, tracing_log_bus: TracingLogBus) -> Resul
 
     // Connect to the container bridge daemon when using the apple-container backend.
     let bridge_client = if is_apple_container {
-        let client = if let Some(ref bridge_tls) = config.bridge_tls {
-            BridgeClient::connect(&config.bridge_endpoint, bridge_tls).await?
+        if !config.bridge_endpoint.is_empty() {
+            let client = if let Some(ref bridge_tls) = config.bridge_tls {
+                BridgeClient::connect(&config.bridge_endpoint, bridge_tls).await?
+            } else {
+                BridgeClient::connect_insecure(&config.bridge_endpoint).await?
+            };
+            Some(client)
         } else {
-            BridgeClient::connect_insecure(&config.bridge_endpoint).await?
-        };
-        Some(client)
+            info!(
+                "Apple Container backend: no bridge endpoint configured, sandbox management disabled"
+            );
+            None
+        }
     } else {
         None
     };
 
-    let sandbox_client = SandboxClient::new(
-        config.sandbox_namespace.clone(),
-        config.sandbox_image.clone(),
-        config.sandbox_image_pull_policy.clone(),
-        config.grpc_endpoint.clone(),
-        format!("0.0.0.0:{}", config.sandbox_ssh_port),
-        config.ssh_handshake_secret.clone(),
-        config.ssh_handshake_skew_secs,
-        config.client_tls_secret_name.clone(),
-        config.host_gateway_ip.clone(),
-    )
-    .await
-    .map_err(|e| Error::execution(format!("failed to create kubernetes client: {e}")))?;
+    // Initialize the Kubernetes sandbox client only when using the k8s backend.
+    // The apple-container backend manages sandboxes via the bridge daemon instead.
+    let sandbox_client = if is_apple_container {
+        // Create a placeholder client for the apple-container backend.
+        // Sandbox operations will go through the bridge client.
+        info!("Apple Container backend: skipping Kubernetes client initialization");
+        SandboxClient::new_disconnected()
+    } else {
+        SandboxClient::new(
+            config.sandbox_namespace.clone(),
+            config.sandbox_image.clone(),
+            config.sandbox_image_pull_policy.clone(),
+            config.grpc_endpoint.clone(),
+            format!("0.0.0.0:{}", config.sandbox_ssh_port),
+            config.ssh_handshake_secret.clone(),
+            config.ssh_handshake_skew_secs,
+            config.client_tls_secret_name.clone(),
+            config.host_gateway_ip.clone(),
+        )
+        .await
+        .map_err(|e| Error::execution(format!("failed to create kubernetes client: {e}")))?
+    };
     let store = Arc::new(store);
 
     let sandbox_index = SandboxIndex::new();
@@ -231,21 +247,24 @@ pub async fn run_server(config: Config, tracing_log_bus: TracingLogBus) -> Resul
         bridge_client,
     ));
 
-    spawn_sandbox_watcher(
-        store.clone(),
-        state.sandbox_client.clone(),
-        state.sandbox_index.clone(),
-        state.sandbox_watch_bus.clone(),
-        state.tracing_log_bus.clone(),
-    );
-    spawn_store_reconciler(
-        store.clone(),
-        state.sandbox_client.clone(),
-        state.sandbox_index.clone(),
-        state.sandbox_watch_bus.clone(),
-        state.tracing_log_bus.clone(),
-    );
-    spawn_kube_event_tailer(state.clone());
+    // Kubernetes-specific background tasks (skip for apple-container backend).
+    if !is_apple_container {
+        spawn_sandbox_watcher(
+            store.clone(),
+            state.sandbox_client.clone(),
+            state.sandbox_index.clone(),
+            state.sandbox_watch_bus.clone(),
+            state.tracing_log_bus.clone(),
+        );
+        spawn_store_reconciler(
+            store.clone(),
+            state.sandbox_client.clone(),
+            state.sandbox_index.clone(),
+            state.sandbox_watch_bus.clone(),
+            state.tracing_log_bus.clone(),
+        );
+        spawn_kube_event_tailer(state.clone());
+    }
     ssh_tunnel::spawn_session_reaper(store.clone(), std::time::Duration::from_secs(3600));
 
     // Create the multiplexed service

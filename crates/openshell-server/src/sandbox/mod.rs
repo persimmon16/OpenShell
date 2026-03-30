@@ -107,6 +107,39 @@ impl SandboxClient {
         })
     }
 
+    /// Create a disconnected SandboxClient for the Apple Container backend.
+    ///
+    /// The Kubernetes client will reject any API calls, but sandbox operations
+    /// go through the bridge daemon instead of the kube API.
+    pub fn new_disconnected() -> Self {
+        // Create a dummy kube config that points nowhere.
+        let config = kube::Config {
+            cluster_url: "https://127.0.0.1:1".parse().expect("valid URL"),
+            default_namespace: "default".to_string(),
+            root_cert: None,
+            connect_timeout: Some(Duration::from_secs(1)),
+            read_timeout: Some(Duration::from_secs(1)),
+            write_timeout: Some(Duration::from_secs(1)),
+            accept_invalid_certs: true,
+            auth_info: Default::default(),
+            proxy_url: None,
+            tls_server_name: None,
+        };
+        let client = Client::try_from(config).expect("dummy kube client");
+        Self {
+            client,
+            namespace: String::new(),
+            default_image: String::new(),
+            image_pull_policy: String::new(),
+            grpc_endpoint: String::new(),
+            ssh_listen_addr: String::new(),
+            ssh_handshake_secret: String::new(),
+            ssh_handshake_skew_secs: 0,
+            client_tls_secret_name: String::new(),
+            host_gateway_ip: String::new(),
+        }
+    }
+
     pub fn default_image(&self) -> &str {
         &self.default_image
     }

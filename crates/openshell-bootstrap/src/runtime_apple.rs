@@ -194,8 +194,8 @@ impl AppleContainerRuntime {
             container_name,
             "-d".to_string(), // detach
             "-p".to_string(),
-            // Map the gateway port to k3s NodePort 30051 (same as Docker path).
-            format!("127.0.0.1:{}:30051", config.gateway_port),
+            // Gateway-only image listens on port 8080 directly (no k3s NodePort).
+            format!("127.0.0.1:{}:8080", config.gateway_port),
             "-v".to_string(),
             format!("{pki_dir}:/etc/openshell-tls"),
             "-v".to_string(),
@@ -210,12 +210,6 @@ impl AppleContainerRuntime {
         }
 
         args.push(config.image_ref.clone());
-
-        // The cluster image entrypoint (cluster-entrypoint.sh) passes "$@" to
-        // k3s, which needs "server" as the first argument. Apple Container
-        // doesn't split ENTRYPOINT and CMD the same way Docker does, so we
-        // must pass the k3s subcommand explicitly.
-        args.push("server".to_string());
 
         let output = tokio::process::Command::new("container")
             .args(&args)
@@ -520,19 +514,33 @@ impl AppleContainerRuntime {
     }
 
     fn build_env_vars(&self, config: &GatewayContainerConfig) -> Vec<String> {
-        // Use the same env var names as the Docker entrypoint (cluster-entrypoint.sh)
-        // since we're reusing the same cluster image for now.
-        let mut env = Vec::new();
+        // The gateway-only image runs openshell-server directly with OPENSHELL_* env vars.
+        // Generate a random handshake secret for the SSH tunnel HMAC.
+        use std::io::Read;
+        let mut bytes = [0u8; 32];
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut f| f.read_exact(&mut bytes))
+            .unwrap_or_default();
+        let secret: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+
+        let mut env = vec![
+            "OPENSHELL_SANDBOX_BACKEND=apple-container".to_string(),
+            "OPENSHELL_DB_URL=sqlite:///var/openshell/openshell.db".to_string(),
+            format!("OPENSHELL_SSH_HANDSHAKE_SECRET={secret}"),
+        ];
 
         if config.disable_tls {
-            env.push("DISABLE_TLS=true".to_string());
+            env.push("OPENSHELL_DISABLE_TLS=true".to_string());
         }
         if config.disable_gateway_auth {
-            env.push("DISABLE_GATEWAY_AUTH=true".to_string());
+            env.push("OPENSHELL_DISABLE_GATEWAY_AUTH=true".to_string());
         }
         if let Some(ref host) = config.ssh_gateway_host {
-            env.push(format!("SSH_GATEWAY_HOST={host}"));
-            env.push(format!("SSH_GATEWAY_PORT={}", config.gateway_port));
+            env.push(format!("OPENSHELL_SSH_GATEWAY_HOST={host}"));
+            env.push(format!(
+                "OPENSHELL_SSH_GATEWAY_PORT={}",
+                config.gateway_port
+            ));
         }
 
         env
