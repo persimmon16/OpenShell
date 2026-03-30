@@ -345,18 +345,23 @@ impl AppleContainerSandboxClient {
         .map_err(|e| tonic::Status::internal(format!("failed to install openssh-server: {e}")))?;
 
         // Configure and start sshd on port 2222 (matches sandbox_ssh_port default).
-        self.exec_as_root(
-            container_name,
+        // Create a user matching the host user so SSH connects seamlessly
+        // (the CLI uses the host username for the SSH connection).
+        let host_user = std::env::var("USER").unwrap_or_else(|_| "sandbox".to_string());
+        let sshd_setup = format!(
             "mkdir -p /run/sshd && \
              ssh-keygen -A 2>/dev/null && \
              sed -i 's/#Port 22/Port 2222/' /etc/ssh/sshd_config && \
              sed -i 's/#PermitEmptyPasswords no/PermitEmptyPasswords yes/' /etc/ssh/sshd_config && \
              sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
              passwd -d sandbox >/dev/null 2>&1 && \
-             /usr/sbin/sshd -p 2222",
-        )
-        .await
-        .map_err(|e| tonic::Status::internal(format!("failed to start sshd: {e}")))?;
+             (id {host_user} >/dev/null 2>&1 || (echo '{host_user}:x:1000:1000::/home/{host_user}:/bin/bash' >> /etc/passwd && mkdir -p /home/{host_user} && chown 1000:1000 /home/{host_user})) && \
+             passwd -d {host_user} >/dev/null 2>&1 && \
+             /usr/sbin/sshd -p 2222"
+        );
+        self.exec_as_root(container_name, &sshd_setup)
+            .await
+            .map_err(|e| tonic::Status::internal(format!("failed to start sshd: {e}")))?;
 
         debug!(container = %container_name, "SSH server started");
         Ok(())
