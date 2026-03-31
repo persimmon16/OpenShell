@@ -34,7 +34,7 @@ use openshell_core::proto::{
     WatchSandboxRequest, open_shell_server::OpenShell,
 };
 use openshell_core::proto::{
-    Sandbox, SandboxPhase, SandboxPolicy as ProtoSandboxPolicy, SandboxStatus, SandboxTemplate,
+    Sandbox, SandboxPhase, SandboxPolicy as ProtoSandboxPolicy, SandboxTemplate,
 };
 use openshell_core::settings::{self, SettingValueKind};
 use prost::Message;
@@ -234,7 +234,7 @@ impl OpenShell for OpenShellService {
         };
         let namespace = self.state.config.sandbox_namespace.clone();
 
-        let mut sandbox = Sandbox {
+        let sandbox = Sandbox {
             id: id.clone(),
             name: name.clone(),
             namespace,
@@ -2496,7 +2496,7 @@ async fn require_no_global_policy(state: &ServerState) -> Result<(), Status> {
 }
 
 async fn merge_chunk_into_policy(
-    store: &crate::persistence::Store,
+    store: &Store,
     sandbox_id: &str,
     chunk: &DraftChunkRecord,
 ) -> Result<(i64, String), Status> {
@@ -3218,7 +3218,7 @@ fn validate_sandbox_template(tmpl: &SandboxTemplate) -> Result<(), Status> {
 
 /// Validate a `map<string, string>` field: entry count, key length, value length.
 fn validate_string_map(
-    map: &std::collections::HashMap<String, String>,
+    map: &HashMap<String, String>,
     max_entries: usize,
     max_key_len: usize,
     max_value_len: usize,
@@ -3569,14 +3569,14 @@ fn build_remote_exec_command(req: &ExecSandboxRequest) -> Result<String, String>
 /// to inject into the sandbox. When duplicate keys appear across providers, the
 /// first provider's value wins.
 async fn resolve_provider_environment(
-    store: &crate::persistence::Store,
+    store: &Store,
     provider_names: &[String],
-) -> Result<std::collections::HashMap<String, String>, Status> {
+) -> Result<HashMap<String, String>, Status> {
     if provider_names.is_empty() {
-        return Ok(std::collections::HashMap::new());
+        return Ok(HashMap::new());
     }
 
-    let mut env = std::collections::HashMap::new();
+    let mut env = HashMap::new();
 
     for name in provider_names {
         let provider = store
@@ -4044,7 +4044,7 @@ fn redact_provider_credentials(mut provider: Provider) -> Provider {
 }
 
 async fn create_provider_record(
-    store: &crate::persistence::Store,
+    store: &Store,
     mut provider: Provider,
 ) -> Result<Provider, Status> {
     if provider.name.is_empty() {
@@ -4082,7 +4082,7 @@ async fn create_provider_record(
 }
 
 async fn get_provider_record(
-    store: &crate::persistence::Store,
+    store: &Store,
     name: &str,
 ) -> Result<Provider, Status> {
     if name.is_empty() {
@@ -4098,7 +4098,7 @@ async fn get_provider_record(
 }
 
 async fn list_provider_records(
-    store: &crate::persistence::Store,
+    store: &Store,
     limit: u32,
     offset: u32,
 ) -> Result<Vec<Provider>, Status> {
@@ -4123,9 +4123,9 @@ async fn list_provider_records(
 /// - Otherwise, upsert all incoming entries into `existing`.
 /// - Entries with an empty-string value are removed (delete semantics).
 fn merge_map(
-    mut existing: std::collections::HashMap<String, String>,
-    incoming: std::collections::HashMap<String, String>,
-) -> std::collections::HashMap<String, String> {
+    mut existing: HashMap<String, String>,
+    incoming: HashMap<String, String>,
+) -> HashMap<String, String> {
     if incoming.is_empty() {
         return existing;
     }
@@ -4140,7 +4140,7 @@ fn merge_map(
 }
 
 async fn update_provider_record(
-    store: &crate::persistence::Store,
+    store: &Store,
     provider: Provider,
 ) -> Result<Provider, Status> {
     if provider.name.is_empty() {
@@ -4184,7 +4184,7 @@ async fn update_provider_record(
 }
 
 async fn delete_provider_record(
-    store: &crate::persistence::Store,
+    store: &Store,
     name: &str,
 ) -> Result<bool, Status> {
     if name.is_empty() {

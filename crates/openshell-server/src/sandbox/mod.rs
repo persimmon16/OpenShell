@@ -7,12 +7,9 @@
 //! via the `container` CLI, called directly from the gateway process.
 
 pub mod apple_container;
-pub mod bridge_client;
 
 use crate::persistence::{ObjectId, ObjectName, ObjectType};
-use openshell_core::proto::{
-    Sandbox, SandboxPhase,
-};
+use openshell_core::proto::Sandbox;
 use std::net::IpAddr;
 
 pub use apple_container::AppleContainerSandboxClient;

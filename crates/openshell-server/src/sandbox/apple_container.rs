@@ -10,7 +10,7 @@
 
 use openshell_core::proto::{Sandbox, SandboxPhase, SandboxSpec};
 use std::net::IpAddr;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 const SANDBOX_PREFIX: &str = "openshell-sandbox-";
 

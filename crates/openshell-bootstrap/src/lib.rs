@@ -350,16 +350,6 @@ pub async fn fetch_gateway_logs(name: &str, n: usize) -> String {
     runtime.fetch_recent_logs(name, n).await
 }
 
-fn default_gateway_image_ref() -> String {
-    // Check for explicit image override first.
-    if let Ok(image) = std::env::var("OPENSHELL_CLUSTER_IMAGE")
-        && !image.trim().is_empty()
-    {
-        return image;
-    }
-    // The gateway runs as a native process — no container image is needed.
-    "native".to_string()
-}
 
 #[cfg(test)]
 mod tests {

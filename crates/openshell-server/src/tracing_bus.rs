@@ -399,6 +399,7 @@ struct PlatformEventBusInner {
     tails: HashMap<String, VecDeque<SandboxStreamEvent>>,
 }
 
+#[allow(dead_code)]
 impl PlatformEventBus {
     /// Default tail buffer capacity (events per sandbox).
     /// Platform events are infrequent (typically 5-10 per sandbox lifecycle).

@@ -1326,16 +1326,16 @@ fn print_failure_diagnosis(diagnosis: &openshell_bootstrap::errors::GatewayFailu
 /// Provision or start a gateway (local or remote).
 pub async fn gateway_admin_deploy(
     name: &str,
-    remote: Option<&str>,
-    ssh_key: Option<&str>,
+    _remote: Option<&str>,
+    _ssh_key: Option<&str>,
     port: u16,
-    gateway_host: Option<&str>,
+    _gateway_host: Option<&str>,
     recreate: bool,
     disable_tls: bool,
     disable_gateway_auth: bool,
-    registry_username: Option<&str>,
-    registry_token: Option<&str>,
-    gpu: bool,
+    _registry_username: Option<&str>,
+    _registry_token: Option<&str>,
+    _gpu: bool,
 ) -> Result<()> {
     let location = "local";
 
@@ -1408,6 +1408,7 @@ pub async fn gateway_admin_deploy(
 /// host from stored gateway metadata.
 enum GatewayControlTarget {
     Local,
+    #[allow(dead_code)]
     Remote(String),
     ExternalRegistration,
 }
@@ -1495,10 +1496,10 @@ pub async fn gateway_admin_stop(
 /// Destroy a gateway and its state.
 pub async fn gateway_admin_destroy(
     name: &str,
-    remote: Option<&str>,
-    ssh_key: Option<&str>,
+    _remote: Option<&str>,
+    _ssh_key: Option<&str>,
 ) -> Result<()> {
-    match resolve_gateway_control_target(name, remote) {
+    match resolve_gateway_control_target(name, _remote) {
         GatewayControlTarget::ExternalRegistration => {
             eprintln!("• Removing gateway registration {name}...");
             remove_gateway_registration(name);
@@ -1782,7 +1783,7 @@ pub async fn sandbox_create_with_bootstrap(
              Or deploy a new gateway: openshell gateway start"
         ));
     }
-    let requested_gpu = gpu || from.is_some_and(source_requests_gpu);
+    let _requested_gpu = gpu || from.is_some_and(source_requests_gpu);
     let (tls, server, gateway_name) =
         crate::bootstrap::run_bootstrap().await?;
     // Disable bootstrap inside sandbox_create so that a transient connection
@@ -1851,8 +1852,8 @@ pub async fn sandbox_create(
     keep: bool,
     gpu: bool,
     editor: Option<Editor>,
-    remote: Option<&str>,
-    ssh_key: Option<&str>,
+    _remote: Option<&str>,
+    _ssh_key: Option<&str>,
     providers: &[String],
     policy: Option<&str>,
     forward: Option<openshell_core::forward::ForwardSpec>,
@@ -1907,7 +1908,7 @@ pub async fn sandbox_create(
                 eprintln!();
                 return Err(err);
             }
-            let requested_gpu = gpu || from.is_some_and(source_requests_gpu);
+            let _requested_gpu = gpu || from.is_some_and(source_requests_gpu);
             let (new_tls, new_server, _) =
                 crate::bootstrap::run_bootstrap().await?;
             let c = grpc_client(&new_server, &new_tls)

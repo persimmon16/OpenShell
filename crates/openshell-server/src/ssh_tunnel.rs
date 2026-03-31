@@ -180,7 +180,6 @@ async fn handle_tunnel(
     ];
     let target_desc = match &target {
         ConnectTarget::Ip(addr) => format!("{addr}"),
-        ConnectTarget::Host(host, port) => format!("{host}:{port}"),
     };
     info!(sandbox_id = %sandbox_id, target = %target_desc, "SSH tunnel: connecting to sandbox");
     for (attempt, delay) in std::iter::once(&Duration::ZERO)
@@ -193,7 +192,6 @@ async fn handle_tunnel(
         }
         let result = match &target {
             ConnectTarget::Ip(addr) => TcpStream::connect(addr).await,
-            ConnectTarget::Host(host, port) => TcpStream::connect((host.as_str(), *port)).await,
         };
         match result {
             Ok(stream) => {
@@ -265,7 +263,6 @@ impl ObjectName for SshSession {
 
 enum ConnectTarget {
     Ip(SocketAddr),
-    Host(String, u16),
 }
 
 /// Decrement a connection count entry, removing it if it reaches zero.
