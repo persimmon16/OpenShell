@@ -109,8 +109,8 @@ struct Args {
     #[arg(long, env = "OPENSHELL_DISABLE_GATEWAY_AUTH")]
     disable_gateway_auth: bool,
 
-    /// Sandbox backend: "kubernetes" (default) or "apple-container".
-    #[arg(long, env = "OPENSHELL_SANDBOX_BACKEND", default_value = "kubernetes")]
+    /// Sandbox backend (always apple-container on macOS).
+    #[arg(long, env = "OPENSHELL_SANDBOX_BACKEND", default_value = "apple-container")]
     sandbox_backend: String,
 
     /// Container bridge daemon endpoint (required for apple-container backend).

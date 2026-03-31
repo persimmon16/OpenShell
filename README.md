@@ -16,7 +16,7 @@ OpenShell is built agent-first. The project ships with agent skills for everythi
 
 ### Prerequisites
 
-- **Docker** — Docker Desktop (or a Docker daemon) must be running.
+- [Apple Container](https://github.com/apple/container) — requires macOS 15+. Install: `brew install container`.
 
 ### Install
 
@@ -40,7 +40,7 @@ Both methods install the latest stable release by default. To install a specific
 openshell sandbox create -- claude  # or opencode, codex, copilot
 ```
 
-A gateway is created automatically on first use. To deploy on a remote host instead, pass `--remote user@host` to the create command.
+A gateway is created automatically on first use.
 
 The sandbox container includes the following tools by default:
 
@@ -99,7 +99,7 @@ OpenShell isolates each sandbox in its own container with policy-enforced egress
 | **Policy Engine**  | Enforces filesystem, network, and process constraints from application layer down to kernel. |
 | **Privacy Router** | Privacy-aware LLM routing that keeps sensitive context on sandbox compute.                   |
 
-Under the hood, all these components run as a [K3s](https://k3s.io/) Kubernetes cluster inside a single Docker container — no separate K8s install required. The `openshell gateway` commands take care of provisioning the container and cluster.
+Under the hood, the gateway runs as a native process and sandboxes are [Apple Container](https://github.com/apple/container) VMs with vmnet networking. The only prerequisite is Apple Container (macOS 15+). The `openshell gateway` commands take care of provisioning automatically.
 
 ## Protection Layers
 

@@ -2,17 +2,13 @@
 
 ## Overview
 
-`openshell-server` is the gateway -- the central control plane for a cluster. It exposes two gRPC services (OpenShell and Inference) and HTTP endpoints on a single multiplexed port, manages sandbox lifecycle, persists state in SQLite or Postgres, and provides SSH tunneling into sandboxes. The gateway coordinates all interactions between clients, the sandbox backend, and the persistence layer.
+`openshell-server` is the gateway -- the central control plane. It exposes two gRPC services (OpenShell and Inference) and HTTP endpoints on a single multiplexed port, manages sandbox lifecycle, persists state in SQLite or Postgres, and provides SSH tunneling into sandboxes. The gateway runs as a native macOS process and coordinates all interactions between clients, the Apple Container sandbox backend, and the persistence layer.
 
-### Sandbox Backends
+### Sandbox Backend
 
-The gateway supports two sandbox backends:
+The gateway uses Apple Container as its sandbox backend. Sandboxes are lightweight VMs managed via a Swift bridge daemon that translates gRPC calls to Apple Container XPC. The gateway connects to the bridge daemon over mutual TLS using the OpenShell PKI. See [Gateway Security](gateway-security.md#bridge-daemon-authentication-apple-container-backend) for the authentication details.
 
-- **Kubernetes** (Linux/remote): Sandboxes are Kubernetes pods managed via the kube-rs client. The gateway runs inside a Docker container with an embedded k3s cluster.
-
-- **Apple Container** (macOS): Sandboxes are lightweight VMs managed via a Swift bridge daemon that translates gRPC calls to Apple Container XPC. The gateway connects to the bridge daemon over mutual TLS using the OpenShell PKI. No Kubernetes is involved. See [Gateway Security](gateway-security.md#bridge-daemon-authentication-apple-container-backend) for the authentication details.
-
-The backend is selected automatically at gateway startup based on the platform and available runtimes. On macOS, Apple Container is preferred when available. The `runtime_type` field in `GatewayMetadata` records which backend was used so subsequent operations (stop, destroy, logs) dispatch correctly. The `sandbox_backend`, `bridge_endpoint`, and `bridge_tls` configuration fields control the server-side sandbox management.
+The `runtime_type` field in `GatewayMetadata` records the backend so subsequent operations (stop, destroy, logs) dispatch correctly. The `sandbox_backend`, `bridge_endpoint`, and `bridge_tls` configuration fields control the server-side sandbox management.
 
 ## Architecture Diagram
 
@@ -31,9 +27,8 @@ graph TD
     HEALTH["Health Endpoints"]
     SSH_TUNNEL["SSH Tunnel<br/>(/connect/ssh)"]
     STORE["Store<br/>(SQLite / Postgres)"]
-    K8S["Kubernetes API"]
+    BRIDGE["Bridge Daemon<br/>(Apple Container)"]
     WATCHER["Sandbox Watcher"]
-    EVENT_TAILER["Kube Event Tailer"]
     WATCH_BUS["SandboxWatchBus"]
     LOG_BUS["TracingLogBus"]
     PLAT_BUS["PlatformEventBus"]
@@ -49,17 +44,14 @@ graph TD
     HTTP --> HEALTH
     HTTP --> SSH_TUNNEL
     NAV --> STORE
-    NAV --> K8S
+    NAV --> BRIDGE
     INF --> STORE
     SSH_TUNNEL --> STORE
-    SSH_TUNNEL --> K8S
-    WATCHER --> K8S
+    SSH_TUNNEL --> BRIDGE
+    WATCHER --> BRIDGE
     WATCHER --> STORE
     WATCHER --> WATCH_BUS
     WATCHER --> INDEX
-    EVENT_TAILER --> K8S
-    EVENT_TAILER --> PLAT_BUS
-    EVENT_TAILER --> INDEX
     LOG_BUS --> PLAT_BUS
 ```
 
@@ -80,9 +72,9 @@ graph TD
 | Persistence | `crates/openshell-server/src/persistence/mod.rs` | `Store` enum (SQLite/Postgres), generic object CRUD, protobuf codec |
 | Persistence: SQLite | `crates/openshell-server/src/persistence/sqlite.rs` | `SqliteStore` with sqlx |
 | Persistence: Postgres | `crates/openshell-server/src/persistence/postgres.rs` | `PostgresStore` with sqlx |
-| Sandbox K8s | `crates/openshell-server/src/sandbox/mod.rs` | `SandboxClient`, CRD creation/deletion, Kubernetes watcher, phase derivation |
-| Sandbox index | `crates/openshell-server/src/sandbox_index.rs` | `SandboxIndex` -- in-memory name/pod-to-id correlation |
-| Watch bus | `crates/openshell-server/src/sandbox_watch.rs` | `SandboxWatchBus`, `PlatformEventBus`, Kubernetes event tailer |
+| Sandbox mgmt | `crates/openshell-server/src/sandbox/mod.rs` | `SandboxClient`, sandbox creation/deletion via bridge daemon, watcher, phase derivation |
+| Sandbox index | `crates/openshell-server/src/sandbox_index.rs` | `SandboxIndex` -- in-memory name/VM-to-id correlation |
+| Watch bus | `crates/openshell-server/src/sandbox_watch.rs` | `SandboxWatchBus`, `PlatformEventBus` |
 | Tracing bus | `crates/openshell-server/src/tracing_bus.rs` | `TracingLogBus` -- captures tracing events keyed by `sandbox_id` |
 
 Proto definitions consumed by the gateway:
@@ -104,11 +96,10 @@ The gateway boots in `main()` (`crates/openshell-server/src/main.rs`) and procee
 4. **Build `Config`** -- Assembles a `openshell_core::Config` from the parsed arguments.
 5. **Call `run_server()`** (`crates/openshell-server/src/lib.rs`):
    1. Connect to the persistence store (`Store::connect`), which auto-detects SQLite vs Postgres from the URL prefix and runs migrations.
-   2. Create `SandboxClient` (initializes a `kube::Client` from in-cluster or kubeconfig).
+   2. Create `SandboxClient` (initializes the bridge daemon connection for Apple Container management).
    3. Build `ServerState` (shared via `Arc<ServerState>` across all handlers).
    4. **Spawn background tasks**:
-      - `spawn_sandbox_watcher` -- watches Kubernetes Sandbox CRDs and syncs state to the store.
-      - `spawn_kube_event_tailer` -- watches Kubernetes Events in the sandbox namespace and publishes them to the `PlatformEventBus`.
+      - `spawn_sandbox_watcher` -- watches sandbox state via the bridge daemon and syncs state to the store.
    5. Create `MultiplexService`.
    6. Bind `TcpListener` on `config.bind_address`.
    7. Optionally create `TlsAcceptor` from cert/key files.
@@ -127,15 +118,15 @@ All configuration is via CLI flags with environment variable fallbacks. The `--d
 | `--tls-client-ca` | `OPENSHELL_TLS_CLIENT_CA` | None | Path to PEM CA cert for mTLS client verification |
 | `--disable-tls` | `OPENSHELL_DISABLE_TLS` | `false` | Listen on plaintext HTTP behind a trusted reverse proxy or tunnel |
 | `--disable-gateway-auth` | `OPENSHELL_DISABLE_GATEWAY_AUTH` | `false` | Keep TLS enabled but allow no-certificate clients and rely on application-layer auth |
-| `--client-tls-secret-name` | `OPENSHELL_CLIENT_TLS_SECRET_NAME` | None | K8s secret name to mount into sandbox pods for mTLS |
-| `--db-url` | `OPENSHELL_DB_URL` | *required* | Database URL (`sqlite:...` or `postgres://...`). The Helm chart defaults to `sqlite:/var/openshell/openshell.db` (persistent volume). In-memory SQLite (`sqlite::memory:?cache=shared`) works for ephemeral/test environments but data is lost on restart. |
-| `--sandbox-namespace` | `OPENSHELL_SANDBOX_NAMESPACE` | `default` | Kubernetes namespace for sandbox CRDs |
-| `--sandbox-image` | `OPENSHELL_SANDBOX_IMAGE` | None | Default container image for sandbox pods |
-| `--grpc-endpoint` | `OPENSHELL_GRPC_ENDPOINT` | None | gRPC endpoint reachable from within the cluster (for sandbox callbacks) |
+| `--client-tls-secret-name` | `OPENSHELL_CLIENT_TLS_SECRET_NAME` | None | Client TLS bundle name for sandbox mTLS |
+| `--db-url` | `OPENSHELL_DB_URL` | *required* | Database URL (`sqlite:...` or `postgres://...`). Defaults to `sqlite:<data_dir>/openshell.db`. In-memory SQLite (`sqlite::memory:?cache=shared`) works for ephemeral/test environments but data is lost on restart. |
+| `--sandbox-namespace` | `OPENSHELL_SANDBOX_NAMESPACE` | `default` | Namespace for sandbox management |
+| `--sandbox-image` | `OPENSHELL_SANDBOX_IMAGE` | None | Default container image for sandbox VMs |
+| `--grpc-endpoint` | `OPENSHELL_GRPC_ENDPOINT` | None | gRPC endpoint reachable from sandbox VMs (for sandbox callbacks) |
 | `--ssh-gateway-host` | `OPENSHELL_SSH_GATEWAY_HOST` | `127.0.0.1` | Public hostname returned in SSH session responses |
 | `--ssh-gateway-port` | `OPENSHELL_SSH_GATEWAY_PORT` | `8080` | Public port returned in SSH session responses |
 | `--ssh-connect-path` | `OPENSHELL_SSH_CONNECT_PATH` | `/connect/ssh` | HTTP path for SSH CONNECT/upgrade |
-| `--sandbox-ssh-port` | `OPENSHELL_SANDBOX_SSH_PORT` | `2222` | SSH listen port inside sandbox pods |
+| `--sandbox-ssh-port` | `OPENSHELL_SANDBOX_SSH_PORT` | `2222` | SSH listen port inside sandbox VMs |
 | `--ssh-handshake-secret` | `OPENSHELL_SSH_HANDSHAKE_SECRET` | None | Shared HMAC-SHA256 secret for gateway-to-sandbox handshake |
 | `--ssh-handshake-skew-secs` | `OPENSHELL_SSH_HANDSHAKE_SKEW_SECS` | `300` | Allowed clock skew (seconds) for SSH handshake timestamps |
 
@@ -158,10 +149,10 @@ pub struct ServerState {
 ```
 
 - **`store`** -- persistence backend (SQLite or Postgres) for all object types.
-- **`sandbox_client`** -- Kubernetes client scoped to the sandbox namespace; creates/deletes CRDs and resolves pod IPs.
-- **`sandbox_index`** -- in-memory bidirectional index mapping sandbox names and agent pod names to sandbox IDs. Used by the event tailer to correlate Kubernetes events.
+- **`sandbox_client`** -- bridge daemon client for Apple Container sandbox management; creates/deletes sandboxes and resolves VM IPs.
+- **`sandbox_index`** -- in-memory bidirectional index mapping sandbox names and agent VM names to sandbox IDs.
 - **`sandbox_watch_bus`** -- `broadcast`-based notification bus keyed by sandbox ID. Producers call `notify(&id)` when the persisted sandbox record changes; consumers in `WatchSandbox` streams receive `()` signals and re-read the record.
-- **`tracing_log_bus`** -- captures `tracing` events that include a `sandbox_id` field and republishes them as `SandboxLogLine` messages. Maintains a per-sandbox tail buffer (default 200 entries). Also contains a nested `PlatformEventBus` for Kubernetes events.
+- **`tracing_log_bus`** -- captures `tracing` events that include a `sandbox_id` field and republishes them as `SandboxLogLine` messages. Maintains a per-sandbox tail buffer (default 200 entries). Also contains a nested `PlatformEventBus` for platform events.
 - **`settings_mutex`** -- serializes settings mutations (global and sandbox) to prevent read-modify-write races. Held for the duration of any setting set/delete or global policy set/delete operation. See [Gateway Settings Channel](gateway-settings.md#global-policy-lifecycle).
 
 ## Protocol Multiplexing
@@ -198,9 +189,9 @@ When TLS is enabled (`crates/openshell-server/src/tls.rs`):
 - `--disable-tls` removes gateway-side TLS entirely and serves plaintext HTTP behind a trusted reverse proxy or tunnel.
 - Supports PKCS#1, PKCS#8, and SEC1 private key formats.
 - The TLS handshake happens before the stream reaches Hyper's auto builder, so ALPN negotiation and HTTP version detection work together transparently.
-- Certificates are generated at cluster bootstrap time by the `openshell-bootstrap` crate using `rcgen`, not by a Helm Job. The bootstrap reconciles three K8s secrets: `openshell-server-tls` (server cert+key), `openshell-server-client-ca` (CA cert), and `openshell-client-tls` (client cert+key+CA, shared by CLI and sandbox pods).
-- **Certificate lifetime**: Certificates use `rcgen` defaults (effectively never expire), which is appropriate for an internal dev-cluster PKI where certs are ephemeral to the cluster's lifetime.
-- **Redeploy behavior**: On redeploy, existing cluster TLS secrets are loaded and reused if they are complete and valid PEM. If secrets are missing, incomplete, or malformed, fresh PKI is generated. If rotation occurs and the openshell workload is already running, the bootstrap performs a rollout restart and waits for completion before persisting CLI-side credentials.
+- Certificates are generated at gateway bootstrap time by the `openshell-bootstrap` crate using `rcgen`. The bootstrap writes certificate files to the gateway's data directory: server cert+key, CA cert, and client cert+key+CA (shared by CLI and sandboxes).
+- **Certificate lifetime**: Certificates use `rcgen` defaults (effectively never expire), which is appropriate for an internal dev PKI where certs are ephemeral to the gateway's lifetime.
+- **Redeploy behavior**: On redeploy, existing certificate files are loaded and reused if they are complete and valid PEM. If files are missing, incomplete, or malformed, fresh PKI is generated. If rotation occurs and the gateway is already running, the bootstrap restarts it before persisting CLI-side credentials.
 
 ## gRPC Services
 
@@ -213,10 +204,10 @@ Defined in `proto/openshell.proto`, implemented in `crates/openshell-server/src/
 | RPC | Description | Key behavior |
 |-----|-------------|--------------|
 | `Health` | Returns service status and version | Always returns `HEALTHY` with `CARGO_PKG_VERSION` |
-| `CreateSandbox` | Create a new sandbox | Validates spec and policy, validates provider names exist (fail-fast), persists to store, creates Kubernetes CRD. On K8s 409 conflict or error, rolls back the store record and index entry. |
+| `CreateSandbox` | Create a new sandbox | Validates spec and policy, validates provider names exist (fail-fast), persists to store, creates sandbox VM via bridge daemon. On conflict or error, rolls back the store record and index entry. |
 | `GetSandbox` | Fetch sandbox by name | Looks up by name via `store.get_message_by_name()` |
 | `ListSandboxes` | List sandboxes | Paginated (default limit 100), decodes protobuf payloads from store records |
-| `DeleteSandbox` | Delete sandbox by name | Sets phase to `Deleting`, persists, notifies watch bus, then deletes the Kubernetes CRD. Cleans up store if the CRD was already gone. |
+| `DeleteSandbox` | Delete sandbox by name | Sets phase to `Deleting`, persists, notifies watch bus, then deletes the sandbox VM via bridge daemon. Cleans up store if the VM was already gone. |
 | `WatchSandbox` | Stream sandbox updates | Server-streaming RPC. See [Watch Sandbox Stream](#watch-sandbox-stream) below. |
 | `ExecSandbox` | Execute command in sandbox | Server-streaming RPC. See [Remote Exec via SSH](#remote-exec-via-ssh) below. |
 
@@ -241,7 +232,7 @@ Full CRUD for `Provider` objects, which store typed credentials (e.g., API keys 
 
 #### Policy, Settings, and Provider Environment Delivery
 
-These RPCs are called by sandbox pods at startup and during runtime polling.
+These RPCs are called by sandboxes at startup and during runtime polling.
 
 | RPC | Description |
 |-----|-------------|
@@ -267,7 +258,7 @@ These RPCs support the sandbox-initiated policy recommendation pipeline. The san
 
 Defined in `proto/inference.proto`, implemented in `crates/openshell-server/src/inference.rs` as `InferenceService`.
 
-The gateway acts as the control plane for inference configuration. It stores a single managed cluster inference route (named `inference.local`) and delivers resolved route bundles to sandbox pods. The gateway does not execute inference requests -- sandboxes connect directly to inference backends using the credentials and endpoints provided in the bundle.
+The gateway acts as the control plane for inference configuration. It stores a single managed inference route (named `inference.local`) and delivers resolved route bundles to sandboxes. The gateway does not execute inference requests -- sandboxes connect directly to inference backends using the credentials and endpoints provided in the bundle.
 
 #### Cluster Inference Configuration
 
@@ -317,14 +308,14 @@ The HTTP router (`crates/openshell-server/src/http.rs`) merges two sub-routers:
 | Path | Method | Response |
 |------|--------|----------|
 | `/health` | GET | `200 OK` (empty body) |
-| `/healthz` | GET | `200 OK` (empty body) -- Kubernetes liveness probe |
-| `/readyz` | GET | `200 OK` with JSON `{"status": "healthy", "version": "<version>"}` -- Kubernetes readiness probe |
+| `/healthz` | GET | `200 OK` (empty body) -- liveness probe |
+| `/readyz` | GET | `200 OK` with JSON `{"status": "healthy", "version": "<version>"}` -- readiness probe |
 
 ### SSH Tunnel Endpoint
 
 | Path | Method | Response |
 |------|--------|----------|
-| `/connect/ssh` | CONNECT | Upgrades the connection to a bidirectional TCP tunnel to a sandbox pod's SSH port |
+| `/connect/ssh` | CONNECT | Upgrades the connection to a bidirectional TCP tunnel to a sandbox VM's SSH port |
 
 See [SSH Tunnel Gateway](#ssh-tunnel-gateway) for details.
 
@@ -345,7 +336,7 @@ The `WatchSandboxRequest` controls what the stream includes:
 
 - `follow_status` -- subscribe to `SandboxWatchBus` notifications and re-read the sandbox record on each change.
 - `follow_logs` -- subscribe to `TracingLogBus` for gateway log lines correlated by `sandbox_id`.
-- `follow_events` -- subscribe to `PlatformEventBus` for Kubernetes events correlated to the sandbox.
+- `follow_events` -- subscribe to `PlatformEventBus` for platform events correlated to the sandbox.
 - `log_tail_lines` -- replay the last N log lines before following (default 200).
 - `stop_on_terminal` -- end the stream when the sandbox reaches the `Ready` phase. Note: `Error` phase does not stop the stream because it may be transient (e.g., `ReconcilerError`).
 
@@ -365,7 +356,6 @@ The `WatchSandboxRequest` controls what the stream includes:
 ```mermaid
 graph LR
     SW["spawn_sandbox_watcher"]
-    ET["spawn_kube_event_tailer"]
     TL["SandboxLogLayer<br/>(tracing layer)"]
 
     WB["SandboxWatchBus<br/>(broadcast per ID)"]
@@ -376,7 +366,7 @@ graph LR
 
     SW -->|"notify(id)"| WB
     TL -->|"publish(id, log_event)"| LB
-    ET -->|"publish(id, platform_event)"| PB
+    LB -->|"platform events"| PB
 
     WB -->|"subscribe(id)"| WS
     LB -->|"subscribe(id)"| WS
@@ -390,19 +380,19 @@ All buses use `tokio::sync::broadcast` channels keyed by sandbox ID. Buffer size
 
 Broadcast lag is translated to `Status::resource_exhausted` via `broadcast_to_status()`.
 
-**Cleanup:** Each bus exposes a `remove(sandbox_id)` method that drops the broadcast sender (closing active receivers with `RecvError::Closed`) and frees internal map entries. Cleanup is wired into both the `handle_deleted` reconciler (Kubernetes watcher) and the `delete_sandbox` gRPC handler to prevent unbounded memory growth from accumulated entries for deleted sandboxes.
+**Cleanup:** Each bus exposes a `remove(sandbox_id)` method that drops the broadcast sender (closing active receivers with `RecvError::Closed`) and frees internal map entries. Cleanup is wired into both the `handle_deleted` reconciler (sandbox watcher) and the `delete_sandbox` gRPC handler to prevent unbounded memory growth from accumulated entries for deleted sandboxes.
 
 **Validation:** `WatchSandbox` validates that the sandbox exists before subscribing to any bus, preventing entries from being created for non-existent IDs. `PushSandboxLogs` validates sandbox existence once on the first batch of the stream.
 
 ## Remote Exec via SSH
 
-The `ExecSandbox` RPC (`crates/openshell-server/src/grpc.rs`) executes a command inside a sandbox pod over SSH and streams stdout/stderr/exit back to the client.
+The `ExecSandbox` RPC (`crates/openshell-server/src/grpc.rs`) executes a command inside a sandbox VM over SSH and streams stdout/stderr/exit back to the client.
 
 ### Execution Flow
 
 1. Validate request: `sandbox_id`, `command`, and environment key format (`^[A-Za-z_][A-Za-z0-9_]*$`).
 2. Verify sandbox exists and is in `Ready` phase.
-3. Resolve target: prefer agent pod IP (via `sandbox_client.agent_pod_ip()`), fall back to Kubernetes service DNS (`<name>.<namespace>.svc.cluster.local`).
+3. Resolve target: resolve the sandbox VM IP via the bridge daemon.
 4. Build the remote command string: sort environment variables, shell-escape all values, prepend `cd <workdir> &&` if `workdir` is set.
 5. **Start a single-use SSH proxy**: binds an ephemeral local TCP port, accepts one connection, performs the NSSH1 handshake with the sandbox, and bidirectionally copies data.
 6. **Connect via `russh`**: establishes an SSH connection through the local proxy, authenticates with `none` auth as user `sandbox`, opens a session channel, and executes the command.
@@ -427,7 +417,7 @@ The `ssh_handshake_skew_secs` configuration controls how much clock skew is tole
 
 ## SSH Tunnel Gateway
 
-The SSH tunnel endpoint (`crates/openshell-server/src/ssh_tunnel.rs`) allows external SSH clients to reach sandbox pods through the gateway using HTTP CONNECT upgrades.
+The SSH tunnel endpoint (`crates/openshell-server/src/ssh_tunnel.rs`) allows external SSH clients to reach sandbox VMs through the gateway using HTTP CONNECT upgrades.
 
 ### Request Flow
 
@@ -435,7 +425,7 @@ The SSH tunnel endpoint (`crates/openshell-server/src/ssh_tunnel.rs`) allows ext
 2. Handler validates the method is CONNECT, extracts headers.
 3. Fetches the `SshSession` from the store by token; rejects if revoked or if `sandbox_id` does not match.
 4. Fetches the `Sandbox`; rejects if not in `Ready` phase.
-5. Resolves the connect target: agent pod IP if available, otherwise Kubernetes service DNS.
+5. Resolves the connect target: sandbox VM IP via the bridge daemon.
 6. Returns `200 OK`, then upgrades the connection via `hyper::upgrade::on()`.
 7. In a spawned task: connects to the sandbox's SSH port, performs the NSSH1 handshake, then bidirectionally copies bytes between the upgraded HTTP connection and the sandbox TCP stream.
 8. On completion, gracefully shuts down the write-half of the upgraded connection for clean EOF handling.
@@ -495,9 +485,7 @@ The `generate_name()` function produces random 6-character lowercase alphabetic 
 
 ### Deployment Storage
 
-The gateway runs as a Kubernetes **StatefulSet** with a `volumeClaimTemplate` that provisions a 1Gi `ReadWriteOnce` PersistentVolumeClaim mounted at `/var/openshell`. On k3s clusters this uses the built-in `local-path-provisioner` StorageClass (the cluster default). The SQLite database file at `/var/openshell/openshell.db` survives pod restarts and rescheduling.
-
-The Helm chart template is at `deploy/helm/openshell/templates/statefulset.yaml`.
+The gateway runs as a native macOS process with its SQLite database stored in the gateway's data directory (typically under `~/.config/openshell/`). The database file persists across gateway restarts.
 
 ### CRUD Semantics
 
@@ -505,31 +493,31 @@ The Helm chart template is at `deploy/helm/openshell/templates/statefulset.yaml`
 - **Get / Delete**: Operate by primary key (`id`), filtered by `object_type`.
 - **List**: Pages by `limit` + `offset` with deterministic ordering: `ORDER BY created_at_ms ASC, name ASC`. The secondary sort on `name` prevents unstable ordering when rows share the same millisecond timestamp.
 
-## Kubernetes Integration
+## Sandbox Management (Apple Container)
 
-### Sandbox CRD Management
+### Sandbox Lifecycle
 
-`SandboxClient` (`crates/openshell-server/src/sandbox/mod.rs`) manages `agents.x-k8s.io/v1alpha1/Sandbox` CRDs.
+`SandboxClient` (`crates/openshell-server/src/sandbox/mod.rs`) manages sandbox VMs via the bridge daemon.
 
-- **Create**: Translates a `Sandbox` proto into a Kubernetes `DynamicObject` with labels (`openshell.ai/sandbox-id`, `openshell.ai/managed-by: openshell`) and a spec that includes the pod template, environment variables, and gateway-required env vars (`OPENSHELL_SANDBOX_ID`, `OPENSHELL_ENDPOINT`, `OPENSHELL_SSH_LISTEN_ADDR`, etc.).
-- **Delete**: Calls the Kubernetes API to delete the CRD by name. Returns `false` if already gone (404).
-- **Pod IP resolution**: `agent_pod_ip()` fetches the agent pod and reads `status.podIP`.
+- **Create**: Translates a `Sandbox` proto into a bridge daemon request with the sandbox image, environment variables, and gateway-required env vars (`OPENSHELL_SANDBOX_ID`, `OPENSHELL_ENDPOINT`, `OPENSHELL_SSH_LISTEN_ADDR`, etc.).
+- **Delete**: Calls the bridge daemon to destroy the sandbox VM. Returns `false` if already gone.
+- **VM IP resolution**: Resolves the sandbox VM's IP address via the bridge daemon.
 
 ### Sandbox Watcher
 
-`spawn_sandbox_watcher()` (`crates/openshell-server/src/sandbox/mod.rs`) runs a Kubernetes watcher on `Sandbox` CRDs and processes three event types:
+`spawn_sandbox_watcher()` (`crates/openshell-server/src/sandbox/mod.rs`) monitors sandbox VM state via the bridge daemon and processes state changes:
 
-- **Applied**: Extracts the sandbox ID from labels (or falls back to name prefix stripping), reads the CRD status, derives the phase, and upserts the sandbox record in the store. Notifies the watch bus.
+- **Applied**: Extracts the sandbox ID, reads the VM status, derives the phase, and upserts the sandbox record in the store. Notifies the watch bus.
 - **Deleted**: Removes the sandbox record from the store and the index. Notifies the watch bus.
 - **Restarted**: Re-processes all objects (full resync).
 
 ### Phase Derivation
 
-`derive_phase()` maps Kubernetes condition state to `SandboxPhase`:
+`derive_phase()` maps sandbox condition state to `SandboxPhase`:
 
 | Condition | Phase |
 |-----------|-------|
-| `deletionTimestamp` is set | `Deleting` |
+| Deletion in progress | `Deleting` |
 | Ready condition `status=True` | `Ready` |
 | Ready condition `status=False`, terminal reason | `Error` |
 | Ready condition `status=False`, transient reason | `Provisioning` |
@@ -538,24 +526,14 @@ The Helm chart template is at `deploy/helm/openshell/templates/statefulset.yaml`
 **Transient reasons** (will retry, stay in `Provisioning`): `ReconcilerError`, `DependenciesNotReady`.
 All other `Ready=False` reasons are treated as terminal failures (`Error` phase).
 
-### Kubernetes Event Tailer
-
-`spawn_kube_event_tailer()` (`crates/openshell-server/src/sandbox_watch.rs`) watches all Kubernetes `Event` objects in the sandbox namespace and correlates them to sandbox IDs using `SandboxIndex`:
-
-- Events involving `kind: Sandbox` are correlated by sandbox name.
-- Events involving `kind: Pod` are correlated by agent pod name.
-- Other event kinds are ignored.
-
-Matched events are published to the `PlatformEventBus` as `SandboxStreamEvent::Event` payloads.
-
 ## Sandbox Index
 
 `SandboxIndex` (`crates/openshell-server/src/sandbox_index.rs`) maintains two in-memory maps protected by an `RwLock`:
 
 - `sandbox_name_to_id: HashMap<String, String>`
-- `agent_pod_to_id: HashMap<String, String>`
+- `agent_vm_to_id: HashMap<String, String>`
 
-Updated by the sandbox watcher on every Applied event and by gRPC handlers during sandbox creation. Used by the event tailer to map Kubernetes event objects back to sandbox IDs.
+Updated by the sandbox watcher on every Applied event and by gRPC handlers during sandbox creation. Used to correlate sandbox events back to sandbox IDs.
 
 ## Error Handling
 
@@ -564,7 +542,7 @@ Updated by the sandbox watcher on every Applied event and by gRPC handlers durin
   - `NotFound` for nonexistent objects
   - `AlreadyExists` for duplicate creation
   - `FailedPrecondition` for state violations (e.g., exec on non-Ready sandbox, missing provider)
-  - `Internal` for store/decode/Kubernetes failures
+  - `Internal` for store/decode/bridge daemon failures
   - `PermissionDenied` for policy violations
   - `ResourceExhausted` for broadcast lag (missed messages)
   - `Cancelled` for closed broadcast channels
@@ -573,7 +551,7 @@ Updated by the sandbox watcher on every Applied event and by gRPC handlers durin
 
 - **Connection errors**: Logged at `error` level but do not crash the gateway. TLS handshake failures and individual connection errors are caught and logged per-connection.
 
-- **Background task errors**: The sandbox watcher and event tailer log warnings for individual processing failures but continue running. If the watcher stream ends, it logs a warning and the task exits (no automatic restart).
+- **Background task errors**: The sandbox watcher logs warnings for individual processing failures but continues running. If the watcher stream ends, it logs a warning and the task exits (no automatic restart).
 
 ## Cross-References
 

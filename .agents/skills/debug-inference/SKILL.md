@@ -215,24 +215,18 @@ Use this fix when a sandbox can reach `https://inference.local`, but OpenShell r
 Example symptom:
 
 ```json
-{"error":"request to http://host.docker.internal:11434/v1/models timed out"}
+{"error":"request to http://host.openshell.internal:11434/v1/models timed out"}
 ```
 
 ### When This Happens
 
-This failure commonly appears on Linux hosts that:
+This failure commonly appears when:
 
-- Run the OpenShell gateway in Docker
-- Route `inference.local` to a host-local OpenAI-compatible endpoint such as Ollama
-- Have a host firewall or networking configuration that denies container-to-host traffic by default
+- The OpenShell gateway routes `inference.local` to a host-local OpenAI-compatible endpoint such as Ollama
+- The inference server binds only to `127.0.0.1` instead of `0.0.0.0`
+- A host firewall blocks connections from the sandbox network (vmnet on macOS)
 
-In this case, OpenShell routing is usually working correctly. The failing hop is container-to-host traffic on the backend port.
-
-### Why CoreDNS Is Not the Cause
-
-This is not the same issue as the Colima CoreDNS fix.
-
-OpenShell injects `host.docker.internal` and `host.openshell.internal` into sandbox pods with `hostAliases`. That path bypasses cluster DNS lookup. If the request still times out, the usual cause is host firewall or network policy, not CoreDNS.
+In this case, OpenShell routing is usually working correctly. The failing hop is sandbox-to-host traffic on the backend port.
 
 ### Verify the Problem
 
@@ -242,55 +236,35 @@ OpenShell injects `host.docker.internal` and `host.openshell.internal` into sand
    curl -sS http://127.0.0.1:11434/v1/models
    ```
 
-2. Confirm the host gateway address also works on the host:
+2. Confirm the model server binds to all interfaces:
 
    ```bash
-   curl -sS http://172.17.0.1:11434/v1/models
+   lsof -iTCP:11434 -sTCP:LISTEN
    ```
 
-3. Test the same endpoint from the OpenShell cluster container:
+   If the `NAME` column shows `localhost:11434` instead of `*:11434`, the server is bound to loopback only and will not be reachable from sandboxes.
+
+3. Test the same endpoint from a sandbox:
 
    ```bash
-   docker exec openshell-cluster-<gateway> wget -qO- -T 5 http://host.docker.internal:11434/v1/models
+   openshell sandbox create -- curl -sS http://host.openshell.internal:11434/v1/models
    ```
 
-If steps 1 and 2 succeed but step 3 times out, the host firewall or network configuration is blocking the container-to-host path.
+If step 1 succeeds but step 3 times out, the inference server is not listening on a sandbox-reachable address, or the host firewall is blocking the connection.
 
 ### Fix
 
-Allow the Docker bridge network used by the OpenShell cluster to reach the host-local inference port. The exact command depends on your firewall tooling (iptables, nftables, firewalld, UFW, etc.), but the rule should allow:
-
-- **Source**: the Docker bridge subnet used by the OpenShell cluster container (commonly `172.18.0.0/16`)
-- **Destination**: the host gateway IP injected into sandbox pods for `host.docker.internal` (commonly `172.17.0.1`)
-- **Port**: the inference server port (e.g. `11434/tcp` for Ollama)
-
-To find the actual values on your system:
-
-```bash
-# Docker bridge subnet for the OpenShell cluster network
-docker network inspect $(docker network ls --filter name=openshell -q) --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
-
-# Host gateway IP visible from inside the container
-docker exec openshell-cluster-<gateway> cat /etc/hosts | grep host.docker.internal
-```
-
-Adjust the source subnet, destination IP, or port to match your local Docker network layout.
+Ensure the sandbox network can reach the host-local inference port. On macOS with Apple Container, sandboxes use vmnet for networking. Confirm the inference server binds to `0.0.0.0` (not just `127.0.0.1`) and that any host firewall allows connections from the vmnet subnet to the inference port (e.g. `11434/tcp` for Ollama).
 
 ### Verify the Fix
 
-1. Re-run the cluster container check:
+Re-test from a sandbox:
 
-   ```bash
-   docker exec openshell-cluster-<gateway> wget -qO- -T 5 http://host.docker.internal:11434/v1/models
-   ```
+```bash
+openshell sandbox create -- curl -sS https://inference.local/v1/models
+```
 
-2. Re-test from a sandbox:
-
-   ```bash
-   curl -sS https://inference.local/v1/models
-   ```
-
-Both commands should return the upstream model list.
+The command should return the upstream model list.
 
 ### If It Still Fails
 
@@ -311,7 +285,7 @@ Both commands should return the upstream model list.
 | `no compatible route` | Provider type does not match request shape | Switch provider type or change the client API |
 | Direct call to external host is denied | Missing policy or provider attachment | Update `network_policies` and launch sandbox with the right provider |
 | SDK fails on empty auth token | Client requires a non-empty API key even though OpenShell injects the real one | Use any placeholder token such as `test` |
-| Upstream timeout from container to host-local backend | Host firewall or network config blocks container-to-host traffic | Allow the Docker bridge subnet to reach the inference port on the host gateway IP (see firewall fix section above) |
+| Upstream timeout from sandbox to host-local backend | Host firewall or network config blocks sandbox-to-host traffic | Ensure the inference server binds to `0.0.0.0` and the host firewall allows the sandbox network to reach the inference port (see firewall fix section above) |
 
 ## Full Diagnostic Dump
 

@@ -273,11 +273,11 @@ impl OpenShell for OpenShellService {
 
         self.state.sandbox_watch_bus.notify(&id);
 
-        // For non-Kubernetes backends, schedule a delayed transition to Ready.
+        // Schedule a delayed transition to Ready.
         // The CLI watch expects to see Provisioning → Ready, so we return the
         // response (with phase=Provisioning) first, letting the CLI set up its
         // watch, then update to Ready via a spawned task.
-        if self.state.sandbox_backend.as_kubernetes().is_none() {
+        {
             let state = self.state.clone();
             let ready_id = id.clone();
             tokio::spawn(async move {

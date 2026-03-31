@@ -42,7 +42,6 @@ What was found? What was tried?>
 ## Environment
 
 - OS: <os>
-- Docker: <version>
 - OpenShell: <version>
 
 ## Logs

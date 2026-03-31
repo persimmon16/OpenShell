@@ -118,7 +118,7 @@ Project requirements:
 
 - Rust 1.88+
 - Python 3.12+
-- Docker (running)
+- Apple Container (must be running)
 
 ## Getting Started
 
@@ -146,45 +146,32 @@ openshell sandbox create -- codex
 
 ### Apple Container (macOS)
 
-On macOS, OpenShell can use Apple Container instead of Docker for local development. This eliminates the need for Docker Desktop, Colima, or any Docker-compatible runtime.
+OpenShell uses Apple Container. The gateway runs as a native macOS process and sandboxes are Apple Container VMs.
 
 Requirements:
 - macOS 15 (Sequoia) or later
 - Apple Container installed (`brew install container` or from [github.com/apple/container](https://github.com/apple/container))
 
-Build and start the bridge daemon:
+Getting started:
 
 ```bash
-mise run apple:build     # Build the Swift bridge daemon
-mise run apple:start     # Start the bridge daemon (port 50052)
-openshell gateway start  # Auto-detects Apple Container
+container system start       # Start Apple Container runtime
+openshell gateway start      # Auto-detects Apple Container, starts native gateway
+openshell sandbox create -- claude  # Creates an Apple Container VM sandbox
 ```
 
-Available mise tasks:
-
-| Task | Description |
-|------|-------------|
-| `apple:build` | Build the Swift bridge daemon |
-| `apple:start` | Start the container bridge daemon |
-| `apple:stop` | Stop the container bridge daemon |
-| `apple:test` | Run macOS E2E tests |
+The CLI auto-detects Apple Container and uses it as the default backend on macOS. No additional configuration is needed.
 
 ### Cluster debugging helpers
 
-Two additional scripts in `scripts/bin/` provide gateway-aware wrappers for cluster debugging:
-
-| Script    | What it does                                                                         |
-| --------- | ------------------------------------------------------------------------------------ |
-| `kubectl` | Runs `kubectl` inside the active gateway's k3s container via `openshell doctor exec` |
-| `k9s`     | Runs `k9s` inside the active gateway's k3s container via `openshell doctor exec`     |
-
-These work for both local and remote gateways (SSH is handled automatically). Examples:
+The `openshell doctor` subcommands provide gateway-aware diagnostics:
 
 ```bash
-kubectl get pods -A
-kubectl logs -n openshell statefulset/openshell
-k9s
-k9s -n openshell
+# List all sandbox containers
+openshell doctor exec -- container list --all
+
+# View gateway logs
+openshell doctor logs
 ```
 
 ## Main Tasks
@@ -209,7 +196,7 @@ These are the primary `mise` tasks for day-to-day development:
 | `python/`       | Python SDK and bindings                       |
 | `proto/`        | Protocol buffer definitions                   |
 | `tasks/`        | `mise` task definitions and build scripts     |
-| `deploy/`       | Dockerfiles, Helm chart, Kubernetes manifests |
+| `deploy/`       | Dockerfiles, deployment configuration |
 | `architecture/` | Architecture docs and plans                   |
 | `docs/`         | User-facing documentation (Sphinx/MyST)       |
 | `.agents/`      | Agent skills and persona definitions          |

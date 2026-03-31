@@ -10,8 +10,6 @@
 //! Sandboxes are Apple Container VMs managed directly by the gateway process
 //! via the `container` CLI. No Kubernetes, no bridge daemon.
 
-#![cfg(target_os = "macos")]
-
 use crate::container_runtime::{
     ExistingGateway, GatewayContainerConfig, PortConflict, RuntimePreflight, RuntimeType,
 };
@@ -247,7 +245,7 @@ impl AppleContainerRuntime {
         mut on_log: impl FnMut(String) + Send,
     ) -> Result<()> {
         let metadata = crate::metadata::get_gateway_metadata(name)
-            .unwrap_or_else(|| crate::metadata::create_gateway_metadata(name, None, 8080));
+            .unwrap_or_else(|| crate::metadata::create_gateway_metadata(name, 8080));
 
         let endpoint = &metadata.gateway_endpoint;
         let port = metadata.gateway_port;

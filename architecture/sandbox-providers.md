@@ -237,7 +237,7 @@ Key behaviors:
 
 The sandbox pod runs `openshell-sandbox` (`crates/openshell-sandbox/src/main.rs`). On
 startup it receives `OPENSHELL_SANDBOX_ID` and `OPENSHELL_ENDPOINT` as environment
-variables (injected into the pod spec by the gateway's Kubernetes sandbox creation code).
+variables (passed to the sandbox VM as environment variables by the gateway).
 
 In `run_sandbox()` (`crates/openshell-sandbox/src/lib.rs`):
 

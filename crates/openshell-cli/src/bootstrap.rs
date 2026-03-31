@@ -119,13 +119,9 @@ fn resolve_bootstrap_name() -> String {
 
 /// Bootstrap a local gateway and return refreshed TLS options that pick up the
 /// newly-written mTLS certificates, along with the gateway name used.
-pub async fn run_bootstrap(
-    remote: Option<&str>,
-    ssh_key: Option<&str>,
-    gpu: bool,
-) -> Result<(TlsOptions, String, String)> {
+pub async fn run_bootstrap() -> Result<(TlsOptions, String, String)> {
     let gateway_name = resolve_bootstrap_name();
-    let location = if remote.is_some() { "remote" } else { "local" };
+    let location = "local";
 
     eprintln!();
     eprintln!(
@@ -144,41 +140,8 @@ pub async fn run_bootstrap(
     );
     eprintln!();
 
-    // Auto-bootstrap always recreates if stale Docker resources are found
-    // (e.g. metadata was deleted but container/volume still exist).
-    let mut options = openshell_bootstrap::DeployOptions::new(&gateway_name).with_recreate(true);
-    if let Some(dest) = remote {
-        let mut remote_opts = openshell_bootstrap::RemoteOptions::new(dest);
-        if let Some(key) = ssh_key {
-            remote_opts = remote_opts.with_ssh_key(key);
-        }
-        options = options.with_remote(remote_opts);
-    }
-    // Read registry credentials from environment for the auto-bootstrap path.
-    // The explicit `--registry-username` / `--registry-token` flags are only
-    // on `gateway start`; when bootstrapping via `sandbox create`, the env
-    // vars are the mechanism.
-    if let Ok(username) = std::env::var("OPENSHELL_REGISTRY_USERNAME")
-        && !username.trim().is_empty()
-    {
-        options = options.with_registry_username(username);
-    }
-    if let Ok(token) = std::env::var("OPENSHELL_REGISTRY_TOKEN")
-        && !token.trim().is_empty()
-    {
-        options = options.with_registry_token(token);
-    }
-    // Read gateway host override from environment. Needed whenever the
-    // client cannot reach the Docker host at 127.0.0.1 — CI containers,
-    // WSL, remote Docker hosts, etc. The explicit `--gateway-host` flag
-    // is only on `gateway start`; this env var covers the auto-bootstrap
-    // path triggered by `sandbox create`.
-    if let Ok(host) = std::env::var("OPENSHELL_GATEWAY_HOST")
-        && !host.trim().is_empty()
-    {
-        options = options.with_gateway_host(host);
-    }
-    options = options.with_gpu(gpu);
+    // Auto-bootstrap always recreates if stale resources are found.
+    let options = openshell_bootstrap::DeployOptions::new(&gateway_name).with_recreate(true);
 
     let handle = deploy_gateway_with_panel(options, &gateway_name, location).await?;
     let server = handle.gateway_endpoint().to_string();

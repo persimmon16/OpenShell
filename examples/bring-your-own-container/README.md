@@ -7,7 +7,7 @@ your local machine through port forwarding.
 ## Prerequisites
 
 - A running OpenShell gateway (`openshell gateway start`)
-- Docker daemon running
+- Apple Container running
 
 ## What's in this example
 
@@ -27,8 +27,8 @@ openshell sandbox create \
     -- python /sandbox/app.py
 ```
 
-The `--from` flag accepts a Dockerfile path. The CLI builds the image,
-pushes it into the cluster, and creates the sandbox in one step.
+The `--from` flag accepts a Dockerfile path. The CLI builds the image
+and creates the sandbox in one step.
 
 The `--forward 8080` flag opens an SSH tunnel so `localhost:8080` on your
 machine reaches the REST API inside the sandbox.

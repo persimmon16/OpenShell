@@ -5,59 +5,48 @@ graph TB
     %% ============================================================
     %% USER'S MACHINE
     %% ============================================================
-    subgraph UserMachine["User's Machine"]
+    subgraph UserMachine["User's Machine (macOS)"]
         CLI["OpenShell CLI<br/>(openshell)"]
         TUI["OpenShell TUI<br/>(openshell term)"]
         SDK["Python SDK<br/>(openshell)"]
-        LocalConfig["~/.config/openshell/<br/>clusters, mTLS certs,<br/>active_cluster"]
+        LocalConfig["~/.config/openshell/<br/>gateways, mTLS certs,<br/>active_gateway"]
     end
 
     %% ============================================================
-    %% KUBERNETES CLUSTER (single Docker container)
+    %% GATEWAY (native macOS process)
     %% ============================================================
-    subgraph Cluster["OpenShell Cluster Container (Docker)"]
+    subgraph GatewayHost["Gateway (native macOS process)"]
 
-        subgraph K3s["k3s (v1.35.2-k3s1)"]
-            KubeAPI["Kubernetes API<br/>:6443"]
-            HelmController["Helm Controller"]
-            LocalPathProv["local-path-provisioner"]
+        subgraph GatewayProcess["openshell-server"]
+            Gateway["openshell-server<br/>:8080<br/>(gRPC + HTTP, mTLS)"]
+            SQLite[("SQLite DB<br/>openshell.db")]
+            WatchBus["SandboxWatchBus<br/>(in-memory broadcast)"]
+            LogBus["TracingLogBus<br/>(in-memory broadcast)"]
         end
 
-        subgraph NSNamespace["openshell namespace"]
+        BridgeDaemon["Bridge Daemon<br/>(Swift, gRPC :50052)"]
+    end
 
-            subgraph GatewayPod["Gateway StatefulSet"]
-                Gateway["openshell-server<br/>:8080<br/>(gRPC + HTTP, mTLS)"]
-                SQLite[("SQLite DB<br/>/var/openshell/<br/>openshell.db")]
-                SandboxWatcher["Sandbox Watcher"]
-                KubeEventTailer["Kube Event Tailer"]
-                WatchBus["SandboxWatchBus<br/>(in-memory broadcast)"]
-                LogBus["TracingLogBus<br/>(in-memory broadcast)"]
-            end
+    %% ============================================================
+    %% SANDBOX (Apple Container VM, 1 per sandbox)
+    %% ============================================================
+    subgraph SandboxVM["Sandbox VM (Apple Container, 1 per sandbox)"]
 
-            subgraph SandboxPod["Sandbox Pod (1 per sandbox)"]
-
-                subgraph Supervisor["Sandbox Supervisor<br/>(privileged user)"]
-                    SSHServer["Embedded SSH<br/>Server (russh)<br/>:2222"]
-                    Proxy["HTTP CONNECT<br/>Proxy<br/>10.200.0.1:3128"]
-                    OPA["OPA Policy Engine<br/>(regorus, in-process)"]
-                    InferenceRouter["Inference Router<br/>(openshell-router)"]
-                    CertCache["TLS MITM<br/>Cert Cache"]
-                end
-
-                subgraph AgentProcess["Agent Process (restricted user)"]
-                    Agent["AI Agent<br/>(Claude / OpenCode /<br/>Codex / Openclaw)"]
-                    Landlock["Landlock FS<br/>Isolation"]
-                    Seccomp["Seccomp BPF<br/>Filtering"]
-                end
-
-                NetNS["Network Namespace<br/>(veth pair:<br/>10.200.0.1 <-> 10.200.0.2)"]
-            end
+        subgraph Supervisor["Sandbox Supervisor<br/>(privileged user)"]
+            SSHServer["Embedded SSH<br/>Server (russh)<br/>:2222"]
+            Proxy["HTTP CONNECT<br/>Proxy<br/>10.200.0.1:3128"]
+            OPA["OPA Policy Engine<br/>(regorus, in-process)"]
+            InferenceRouter["Inference Router<br/>(openshell-router)"]
+            CertCache["TLS MITM<br/>Cert Cache"]
         end
 
-        subgraph ASNamespace["agent-sandbox-system namespace"]
-            CRDController["Agent Sandbox<br/>CRD Controller"]
+        subgraph AgentProcess["Agent Process (restricted user)"]
+            Agent["AI Agent<br/>(Claude / OpenCode /<br/>Codex / Openclaw)"]
+            Landlock["Landlock FS<br/>Isolation"]
+            Seccomp["Seccomp BPF<br/>Filtering"]
         end
 
+        NetNS["Network Namespace<br/>(veth pair:<br/>10.200.0.1 <-> 10.200.0.2)"]
     end
 
     %% ============================================================
@@ -84,14 +73,10 @@ graph TB
         NPM["npm Registry<br/>registry.npmjs.org:443"]
     end
 
-    subgraph ContainerRegistry["Container Registry"]
-        GHCR["GitHub Container Registry<br/>ghcr.io"]
-    end
-
     %% ============================================================
-    %% CONNECTIONS: User Machine --> Cluster
+    %% CONNECTIONS: User Machine --> Gateway
     %% ============================================================
-    CLI -- "gRPC over HTTPS (mTLS)<br/>:30051 NodePort" --> Gateway
+    CLI -- "gRPC over HTTPS (mTLS)<br/>:8080" --> Gateway
     TUI -- "gRPC polling (mTLS)<br/>every 2s" --> Gateway
     SDK -- "gRPC over HTTPS (mTLS)" --> Gateway
     CLI -- "HTTP CONNECT upgrade<br/>/connect/ssh (mTLS)" --> Gateway
@@ -101,15 +86,9 @@ graph TB
     %% CONNECTIONS: Gateway internals
     %% ============================================================
     Gateway --> SQLite
-    Gateway -- "Watch + CRUD<br/>Sandbox CRDs" --> KubeAPI
-    SandboxWatcher -- "status changes" --> WatchBus
-    KubeEventTailer -- "K8s events" --> Gateway
+    Gateway -- "mTLS gRPC" --> BridgeDaemon
+    BridgeDaemon -- "Apple Container<br/>XPC" --> SandboxVM
     Gateway -- "NSSH1 handshake<br/>(HMAC-SHA256) + SSH<br/>:2222" --> SSHServer
-
-    %% ============================================================
-    %% CONNECTIONS: CRD Controller
-    %% ============================================================
-    CRDController -- "manages Sandbox<br/>custom resources" --> KubeAPI
 
     %% ============================================================
     %% CONNECTIONS: Sandbox internals
@@ -140,11 +119,6 @@ graph TB
     InferenceRouter -- "HTTPS" --> NVIDIA_API
 
     %% ============================================================
-    %% CONNECTIONS: Cluster bootstrap
-    %% ============================================================
-    K3s -- "pulls images<br/>at runtime" --> GHCR
-
-    %% ============================================================
     %% FILE SYNC
     %% ============================================================
     CLI -- "tar-over-SSH<br/>(file sync)" --> SSHServer
@@ -160,16 +134,16 @@ graph TB
     classDef security fill:#EF5350,stroke:#C62828,color:#fff
     classDef datastore fill:#5C6BC0,stroke:#3949AB,color:#fff
     classDef external fill:#78909C,stroke:#546E7A,color:#fff
-    classDef k8s fill:#326CE5,stroke:#1A4DB5,color:#fff
+    classDef bridge fill:#26A69A,stroke:#00897B,color:#fff
     classDef config fill:#90A4AE,stroke:#607D8B,color:#fff
 
     class CLI,TUI,SDK userComponent
-    class Gateway,SandboxWatcher,KubeEventTailer,WatchBus,LogBus gateway
+    class Gateway,WatchBus,LogBus gateway
     class SSHServer,Proxy,OPA,InferenceRouter,CertCache sandbox
     class Agent,Landlock,Seccomp,NetNS agent
     class SQLite datastore
-    class Anthropic,OpenAI,NVIDIA_API,GitHub,GitLab,PyPI,NPM,LMStudio,VLLM,GHCR external
-    class KubeAPI,HelmController,LocalPathProv,CRDController k8s
+    class Anthropic,OpenAI,NVIDIA_API,GitHub,GitLab,PyPI,NPM,LMStudio,VLLM external
+    class BridgeDaemon bridge
     class LocalConfig config
 ```
 
@@ -182,19 +156,21 @@ graph TB
 | Green | Sandbox supervisor | SSH server, HTTP CONNECT proxy, OPA engine, inference router |
 | Purple | Agent process & isolation | AI agent, Landlock, Seccomp, network namespace |
 | Indigo | Data stores | SQLite database |
-| Dark blue | Kubernetes infrastructure | K8s API, Helm controller, CRD controller |
+| Teal | Bridge daemon | Swift bridge daemon (Apple Container XPC) |
 | Gray | External systems | AI APIs, code hosting, package registries, inference backends |
 
 ## Key Communication Flows
 
-1. **CLI/SDK to Gateway**: All control-plane traffic uses gRPC over HTTPS with mutual TLS (mTLS). Single multiplexed port (8080 inside cluster, 30051 NodePort).
+1. **CLI/SDK to Gateway**: All control-plane traffic uses gRPC over HTTPS with mutual TLS (mTLS). Single multiplexed port (8080), gateway binds directly on the host.
 
-2. **SSH Access**: CLI connects via HTTP CONNECT upgrade at `/connect/ssh`. Gateway authenticates with session token, then bridges to sandbox SSH (port 2222) using NSSH1 HMAC-SHA256 handshake.
+2. **Gateway to Bridge Daemon**: The gateway manages sandbox VMs through the Swift bridge daemon over mTLS gRPC. The bridge daemon translates calls into Apple Container XPC operations.
 
-3. **File Sync**: tar archives streamed over the SSH tunnel (no rsync dependency).
+3. **SSH Access**: CLI connects via HTTP CONNECT upgrade at `/connect/ssh`. Gateway authenticates with session token, then bridges to sandbox SSH (port 2222) using NSSH1 HMAC-SHA256 handshake.
 
-4. **Sandbox to External**: All agent outbound traffic is forced through the HTTP CONNECT proxy (10.200.0.1:3128) via a network namespace veth pair. OPA/Rego policies evaluate every connection. TLS is automatically detected and terminated for credential injection; endpoints with `protocol` configured also get L7 request-level inspection.
+4. **File Sync**: tar archives streamed over the SSH tunnel (no rsync dependency).
 
-5. **Inference Routing**: Inference requests are handled inside the sandbox by the openshell-router (not through the gateway). The gateway provides route configuration and credentials via gRPC; the sandbox executes HTTP requests directly to inference backends.
+5. **Sandbox to External**: All agent outbound traffic is forced through the HTTP CONNECT proxy (10.200.0.1:3128) via a network namespace veth pair. OPA/Rego policies evaluate every connection. TLS is automatically detected and terminated for credential injection; endpoints with `protocol` configured also get L7 request-level inspection.
 
-6. **Sandbox to Gateway**: The sandbox supervisor uses gRPC (mTLS) to fetch policies and runtime settings (via `GetSandboxSettings`), provider credentials, inference bundles, and to push logs back to the gateway. The settings channel delivers typed key-value pairs alongside policy through a unified poll loop.
+6. **Inference Routing**: Inference requests are handled inside the sandbox by the openshell-router (not through the gateway). The gateway provides route configuration and credentials via gRPC; the sandbox executes HTTP requests directly to inference backends.
+
+7. **Sandbox to Gateway**: The sandbox supervisor uses gRPC (mTLS) to fetch policies and runtime settings (via `GetSandboxSettings`), provider credentials, inference bundles, and to push logs back to the gateway. The settings channel delivers typed key-value pairs alongside policy through a unified poll loop.

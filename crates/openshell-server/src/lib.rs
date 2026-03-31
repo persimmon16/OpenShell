@@ -35,9 +35,9 @@ pub use grpc::OpenShellService;
 pub use http::{health_router, http_router};
 pub use multiplex::{MultiplexService, MultiplexedService};
 use persistence::Store;
-use sandbox::{SandboxBackend, SandboxClient, spawn_sandbox_watcher, spawn_store_reconciler};
+use sandbox::SandboxBackend;
 use sandbox_index::SandboxIndex;
-use sandbox_watch::{SandboxWatchBus, spawn_kube_event_tailer};
+use sandbox_watch::SandboxWatchBus;
 pub use tls::TlsAcceptor;
 use tracing_bus::TracingLogBus;
 
@@ -50,7 +50,7 @@ pub struct ServerState {
     /// Persistence store.
     pub store: Arc<Store>,
 
-    /// Sandbox backend — Kubernetes or Apple Container.
+    /// Sandbox backend — Apple Container.
     pub sandbox_backend: SandboxBackend,
 
     /// In-memory sandbox correlation index.
@@ -164,52 +164,19 @@ pub async fn run_server(config: Config, tracing_log_bus: TracingLogBus) -> Resul
         ));
     }
 
-    let is_apple_container = config.sandbox_backend == "apple-container";
-
-    // Log bridge configuration status when using the apple-container backend.
-    if is_apple_container {
-        if config.bridge_endpoint.is_empty() {
-            info!(
-                "Apple Container backend: no bridge endpoint configured. \
-                 Sandbox create/delete operations will not be available until \
-                 the bridge daemon is running and --bridge-endpoint is set."
-            );
-        } else if config.bridge_tls.is_none() {
-            info!(
-                "Bridge mTLS not configured — connecting to bridge daemon without authentication. \
-                 Set --bridge-tls-ca, --bridge-tls-cert, and --bridge-tls-key for production use."
-            );
-        }
-    }
-
     let store = Store::connect(database_url).await?;
 
-    // Initialize the sandbox backend based on the configured sandbox_backend.
-    let sandbox_backend = if is_apple_container {
-        info!("Initializing Apple Container sandbox backend");
+    // Initialize the Apple Container sandbox backend.
+    info!("Initializing Apple Container sandbox backend");
+    let sandbox_backend =
         SandboxBackend::AppleContainer(sandbox::apple_container::AppleContainerSandboxClient::new(
             config.sandbox_image.clone(),
             config.grpc_endpoint.clone(),
             format!("0.0.0.0:{}", config.sandbox_ssh_port),
             config.ssh_handshake_secret.clone(),
             config.ssh_handshake_skew_secs,
-        ))
-    } else {
-        let sandbox_client = SandboxClient::new(
-            config.sandbox_namespace.clone(),
-            config.sandbox_image.clone(),
-            config.sandbox_image_pull_policy.clone(),
-            config.grpc_endpoint.clone(),
-            format!("0.0.0.0:{}", config.sandbox_ssh_port),
-            config.ssh_handshake_secret.clone(),
-            config.ssh_handshake_skew_secs,
-            config.client_tls_secret_name.clone(),
-            config.host_gateway_ip.clone(),
-        )
-        .await
-        .map_err(|e| Error::execution(format!("failed to create kubernetes client: {e}")))?;
-        SandboxBackend::Kubernetes(sandbox_client)
-    };
+        ));
+
     let store = Arc::new(store);
 
     let sandbox_index = SandboxIndex::new();
@@ -223,24 +190,6 @@ pub async fn run_server(config: Config, tracing_log_bus: TracingLogBus) -> Resul
         tracing_log_bus,
     ));
 
-    // Kubernetes-specific background tasks (only run on k8s backend).
-    if let Some(k8s_client) = state.sandbox_backend.as_kubernetes() {
-        spawn_sandbox_watcher(
-            store.clone(),
-            k8s_client.clone(),
-            state.sandbox_index.clone(),
-            state.sandbox_watch_bus.clone(),
-            state.tracing_log_bus.clone(),
-        );
-        spawn_store_reconciler(
-            store.clone(),
-            k8s_client.clone(),
-            state.sandbox_index.clone(),
-            state.sandbox_watch_bus.clone(),
-            state.tracing_log_bus.clone(),
-        );
-        spawn_kube_event_tailer(state.clone());
-    }
     ssh_tunnel::spawn_session_reaper(store.clone(), std::time::Duration::from_secs(3600));
 
     // Create the multiplexed service

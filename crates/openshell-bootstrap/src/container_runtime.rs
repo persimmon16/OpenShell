@@ -3,35 +3,26 @@
 
 //! Container runtime abstraction layer.
 //!
-//! This module defines [`RuntimeBackend`], an enum that decouples the gateway
-//! bootstrap orchestration from any specific container backend (Docker, Apple
-//! Container). All container lifecycle operations go through this enum, which
-//! delegates to the appropriate backend implementation.
+//! This module defines [`RuntimeBackend`], which wraps the Apple Container
+//! runtime. All container lifecycle operations go through this wrapper.
 
 use miette::Result;
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::docker::DockerRuntime;
-#[cfg(target_os = "macos")]
 use crate::runtime_apple::AppleContainerRuntime;
 
 /// The type of container runtime detected on this system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeType {
-    /// Docker / Docker-compatible daemon (Colima, OrbStack, etc.) with k3s.
-    Docker,
-    /// Apple Container (macOS-native, no k3s).
-    #[cfg(target_os = "macos")]
+    /// Apple Container (macOS-native).
     AppleContainer,
 }
 
 impl std::fmt::Display for RuntimeType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Docker => write!(f, "docker"),
-            #[cfg(target_os = "macos")]
             Self::AppleContainer => write!(f, "apple_container"),
         }
     }
@@ -73,10 +64,10 @@ pub struct GatewayContainerConfig {
     pub gpu: bool,
 }
 
-/// A container that is holding a port we need.
+/// A process/container that is holding a port we need.
 #[derive(Debug, Clone)]
 pub struct PortConflict {
-    /// Name of the container holding the port.
+    /// Name of the process or container holding the port.
     pub container_name: String,
     /// The host port that conflicts.
     pub host_port: u16,
@@ -84,29 +75,21 @@ pub struct PortConflict {
 
 /// Unified container runtime backend.
 ///
-/// The orchestrator code in `lib.rs` uses this enum for all container
-/// operations. Each variant delegates to the concrete backend implementation.
+/// Wraps the Apple Container runtime for all container lifecycle operations.
 pub enum RuntimeBackend {
-    Docker(DockerRuntime),
-    #[cfg(target_os = "macos")]
     AppleContainer(AppleContainerRuntime),
 }
 
 impl RuntimeBackend {
     pub fn runtime_type(&self) -> RuntimeType {
         match self {
-            Self::Docker(_) => RuntimeType::Docker,
-            #[cfg(target_os = "macos")]
             Self::AppleContainer(_) => RuntimeType::AppleContainer,
         }
     }
 
     pub async fn check_available(&self) -> Result<RuntimePreflight> {
-        match self {
-            Self::Docker(r) => r.check_available().await,
-            #[cfg(target_os = "macos")]
-            Self::AppleContainer(r) => r.check_available().await,
-        }
+        let Self::AppleContainer(r) = self;
+        r.check_available().await
     }
 
     pub async fn ensure_image(
@@ -115,17 +98,9 @@ impl RuntimeBackend {
         registry_username: Option<&str>,
         registry_token: Option<&str>,
     ) -> Result<()> {
-        match self {
-            Self::Docker(r) => {
-                r.ensure_image(image_ref, registry_username, registry_token)
-                    .await
-            }
-            #[cfg(target_os = "macos")]
-            Self::AppleContainer(r) => {
-                r.ensure_image(image_ref, registry_username, registry_token)
-                    .await
-            }
-        }
+        let Self::AppleContainer(r) = self;
+        r.ensure_image(image_ref, registry_username, registry_token)
+            .await
     }
 
     pub async fn pull_image(
@@ -135,81 +110,49 @@ impl RuntimeBackend {
         registry_token: Option<&str>,
         on_progress: impl FnMut(String) + Send + 'static,
     ) -> Result<()> {
-        match self {
-            Self::Docker(r) => {
-                r.pull_image(image_ref, registry_username, registry_token, on_progress)
-                    .await
-            }
-            #[cfg(target_os = "macos")]
-            Self::AppleContainer(r) => {
-                r.pull_image(image_ref, registry_username, registry_token, on_progress)
-                    .await
-            }
-        }
+        let Self::AppleContainer(r) = self;
+        r.pull_image(image_ref, registry_username, registry_token, on_progress)
+            .await
     }
 
     pub async fn check_existing(&self, name: &str) -> Result<Option<ExistingGateway>> {
-        match self {
-            Self::Docker(r) => r.check_existing(name).await,
-            #[cfg(target_os = "macos")]
-            Self::AppleContainer(r) => r.check_existing(name).await,
-        }
+        let Self::AppleContainer(r) = self;
+        r.check_existing(name).await
     }
 
     pub async fn create_gateway(&self, name: &str, config: &GatewayContainerConfig) -> Result<()> {
-        match self {
-            Self::Docker(r) => r.create_gateway(name, config).await,
-            #[cfg(target_os = "macos")]
-            Self::AppleContainer(r) => r.create_gateway(name, config).await,
-        }
+        let Self::AppleContainer(r) = self;
+        r.create_gateway(name, config).await
     }
 
     pub async fn start_gateway(&self, name: &str) -> Result<()> {
-        match self {
-            Self::Docker(r) => r.start_gateway(name).await,
-            #[cfg(target_os = "macos")]
-            Self::AppleContainer(r) => r.start_gateway(name).await,
-        }
+        let Self::AppleContainer(r) = self;
+        r.start_gateway(name).await
     }
 
     pub async fn stop_gateway(&self, name: &str) -> Result<()> {
-        match self {
-            Self::Docker(r) => r.stop_gateway(name).await,
-            #[cfg(target_os = "macos")]
-            Self::AppleContainer(r) => r.stop_gateway(name).await,
-        }
+        let Self::AppleContainer(r) = self;
+        r.stop_gateway(name).await
     }
 
     pub async fn destroy_resources(&self, name: &str) -> Result<()> {
-        match self {
-            Self::Docker(r) => r.destroy_resources(name).await,
-            #[cfg(target_os = "macos")]
-            Self::AppleContainer(r) => r.destroy_resources(name).await,
-        }
+        let Self::AppleContainer(r) = self;
+        r.destroy_resources(name).await
     }
 
     pub async fn ensure_network(&self, name: &str) -> Result<()> {
-        match self {
-            Self::Docker(r) => r.ensure_network(name).await,
-            #[cfg(target_os = "macos")]
-            Self::AppleContainer(r) => r.ensure_network(name).await,
-        }
+        let Self::AppleContainer(r) = self;
+        r.ensure_network(name).await
     }
 
     pub async fn ensure_storage(&self, name: &str) -> Result<()> {
-        match self {
-            Self::Docker(r) => r.ensure_storage(name).await,
-            #[cfg(target_os = "macos")]
-            Self::AppleContainer(r) => r.ensure_storage(name).await,
-        }
+        let Self::AppleContainer(r) = self;
+        r.ensure_storage(name).await
     }
 
     pub async fn exec_capture(&self, name: &str, cmd: Vec<String>) -> Result<(String, i64)> {
-        match self {
-            Self::Docker(r) => r.exec_capture(name, cmd).await,
-            #[cfg(target_os = "macos")]
-            Self::AppleContainer(r) => r.exec_capture(name, cmd).await,
-        }
+        let Self::AppleContainer(r) = self;
+        r.exec_capture(name, cmd).await
     }
 
     pub async fn wait_for_ready(
@@ -217,19 +160,13 @@ impl RuntimeBackend {
         name: &str,
         on_log: impl FnMut(String) + Send,
     ) -> Result<()> {
-        match self {
-            Self::Docker(r) => r.wait_for_ready(name, on_log).await,
-            #[cfg(target_os = "macos")]
-            Self::AppleContainer(r) => r.wait_for_ready(name, on_log).await,
-        }
+        let Self::AppleContainer(r) = self;
+        r.wait_for_ready(name, on_log).await
     }
 
     pub async fn fetch_recent_logs(&self, name: &str, n: usize) -> String {
-        match self {
-            Self::Docker(r) => r.fetch_recent_logs(name, n).await,
-            #[cfg(target_os = "macos")]
-            Self::AppleContainer(r) => r.fetch_recent_logs(name, n).await,
-        }
+        let Self::AppleContainer(r) = self;
+        r.fetch_recent_logs(name, n).await
     }
 
     pub async fn stream_logs<W: std::io::Write + Send>(
@@ -239,11 +176,8 @@ impl RuntimeBackend {
         lines: Option<usize>,
         writer: W,
     ) -> Result<()> {
-        match self {
-            Self::Docker(r) => r.stream_logs(name, follow, lines, writer).await,
-            #[cfg(target_os = "macos")]
-            Self::AppleContainer(r) => r.stream_logs(name, follow, lines, writer).await,
-        }
+        let Self::AppleContainer(r) = self;
+        r.stream_logs(name, follow, lines, writer).await
     }
 
     pub async fn push_images(
@@ -252,19 +186,13 @@ impl RuntimeBackend {
         images: &[&str],
         on_log: &mut (dyn FnMut(String) + Send),
     ) -> Result<()> {
-        match self {
-            Self::Docker(r) => r.push_images(name, images, on_log).await,
-            #[cfg(target_os = "macos")]
-            Self::AppleContainer(r) => r.push_images(name, images, on_log).await,
-        }
+        let Self::AppleContainer(r) = self;
+        r.push_images(name, images, on_log).await
     }
 
     pub async fn check_port_conflicts(&self, name: &str, port: u16) -> Result<Vec<PortConflict>> {
-        match self {
-            Self::Docker(r) => r.check_port_conflicts(name, port).await,
-            #[cfg(target_os = "macos")]
-            Self::AppleContainer(r) => r.check_port_conflicts(name, port).await,
-        }
+        let Self::AppleContainer(r) = self;
+        r.check_port_conflicts(name, port).await
     }
 
     pub async fn build_image(
@@ -275,11 +203,8 @@ impl RuntimeBackend {
         args: &HashMap<String, String>,
         on_log: &mut (dyn FnMut(String) + Send),
     ) -> Result<()> {
-        match self {
-            Self::Docker(r) => r.build_image(dockerfile, tag, context, args, on_log).await,
-            #[cfg(target_os = "macos")]
-            Self::AppleContainer(r) => r.build_image(dockerfile, tag, context, args, on_log).await,
-        }
+        let Self::AppleContainer(r) = self;
+        r.build_image(dockerfile, tag, context, args, on_log).await
     }
 
     pub async fn build_and_push_image(
@@ -291,41 +216,20 @@ impl RuntimeBackend {
         args: &HashMap<String, String>,
         on_log: &mut (dyn FnMut(String) + Send),
     ) -> Result<()> {
-        match self {
-            Self::Docker(r) => {
-                r.build_and_push_image(dockerfile, tag, context, gateway_name, args, on_log)
-                    .await
-            }
-            #[cfg(target_os = "macos")]
-            Self::AppleContainer(r) => {
-                r.build_and_push_image(dockerfile, tag, context, gateway_name, args, on_log)
-                    .await
-            }
-        }
+        let Self::AppleContainer(r) = self;
+        r.build_and_push_image(dockerfile, tag, context, gateway_name, args, on_log)
+            .await
     }
 
     pub async fn check_container_running(&self, name: &str) -> Result<()> {
-        match self {
-            Self::Docker(r) => r.check_container_running(name).await,
-            #[cfg(target_os = "macos")]
-            Self::AppleContainer(r) => r.check_container_running(name).await,
-        }
-    }
-
-    /// Whether this runtime uses k3s/Kubernetes for sandbox management.
-    pub fn uses_kubernetes(&self) -> bool {
-        match self {
-            Self::Docker(_) => true,
-            #[cfg(target_os = "macos")]
-            Self::AppleContainer(_) => false,
-        }
+        let Self::AppleContainer(r) = self;
+        r.check_container_running(name).await
     }
 }
 
 /// Detect whether Apple Container is available on this system.
 ///
 /// Runs `container system status` and checks for a "running" status.
-#[cfg(target_os = "macos")]
 pub fn apple_container_available() -> bool {
     let output = std::process::Command::new("container")
         .args(["system", "status"])

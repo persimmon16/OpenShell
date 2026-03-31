@@ -16,7 +16,7 @@ use hyper_util::{client::legacy::Client, rt::TokioExecutor};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use miette::{IntoDiagnostic, Result, WrapErr, miette};
 use openshell_bootstrap::{
-    DeployOptions, GatewayMetadata, RemoteOptions, clear_active_gateway,
+    DeployOptions, GatewayMetadata, clear_active_gateway,
     clear_last_sandbox_if_matches, container_name, extract_host_from_ssh_destination,
     get_gateway_metadata, list_gateways, load_active_gateway, remove_gateway_metadata,
     resolve_ssh_hostname, save_active_gateway, save_last_sandbox, store_gateway_metadata,
@@ -986,43 +986,21 @@ pub async fn gateway_add(
     }
 
     if remote.is_some() || local {
-        // mTLS gateway (remote or local).
-        let remote_opts = remote.map(|dest| {
-            let mut opts = RemoteOptions::new(dest);
-            if let Some(key) = ssh_key {
-                opts = opts.with_ssh_key(key);
-            }
-            opts
-        });
-
-        // Extract certs BEFORE storing metadata — if this fails the gateway
-        // is not registered.  Pass the endpoint port so the container can be
-        // identified by its host port binding when multiple gateways run on
-        // the same Docker host.
-        let endpoint_port = url::Url::parse(&endpoint).ok().and_then(|u| u.port());
-        eprintln!("• Extracting TLS certificates from gateway container...");
-        openshell_bootstrap::extract_and_store_pki(name, remote_opts.as_ref(), endpoint_port)
-            .await?;
-
-        let (remote_host, resolved_host) = if let Some(dest) = remote {
-            let ssh_host = extract_host_from_ssh_destination(dest);
-            let resolved = resolve_ssh_hostname(&ssh_host);
-            (Some(dest.to_string()), Some(resolved))
-        } else {
-            (None, None)
-        };
-
+        // mTLS gateway (local registration).
         let metadata = GatewayMetadata {
             name: name.to_string(),
             gateway_endpoint: endpoint.clone(),
-            is_remote: !local,
+            is_remote: remote.is_some(),
             gateway_port: 0,
-            remote_host,
-            resolved_host,
+            remote_host: remote.map(|d| d.to_string()),
+            resolved_host: remote.map(|d| {
+                let ssh_host = extract_host_from_ssh_destination(d);
+                resolve_ssh_hostname(&ssh_host)
+            }),
             auth_mode: Some("mtls".to_string()),
             edge_team_domain: None,
             edge_auth_url: None,
-            runtime_type: openshell_bootstrap::container_runtime::RuntimeType::Docker,
+            runtime_type: openshell_bootstrap::container_runtime::RuntimeType::AppleContainer,
         };
 
         store_gateway_metadata(name, &metadata)?;
@@ -1052,7 +1030,7 @@ pub async fn gateway_add(
             auth_mode: Some("cloudflare_jwt".to_string()),
             edge_team_domain: None,
             edge_auth_url: None,
-            runtime_type: openshell_bootstrap::container_runtime::RuntimeType::Docker,
+            runtime_type: openshell_bootstrap::container_runtime::RuntimeType::AppleContainer,
         };
 
         store_gateway_metadata(name, &metadata)?;
@@ -1359,23 +1337,13 @@ pub async fn gateway_admin_deploy(
     registry_token: Option<&str>,
     gpu: bool,
 ) -> Result<()> {
-    let location = if remote.is_some() { "remote" } else { "local" };
-
-    // Build remote options once so we can reuse them for the existence check
-    // and the deploy options.
-    let remote_opts = remote.map(|dest| {
-        let mut opts = RemoteOptions::new(dest);
-        if let Some(key) = ssh_key {
-            opts = opts.with_ssh_key(key);
-        }
-        opts
-    });
+    let location = "local";
 
     // Check whether a gateway already exists. If so, prompt the user (unless
     // --recreate was passed or we're in non-interactive mode).
     let mut should_recreate = recreate;
     if let Some(existing) =
-        openshell_bootstrap::check_existing_deployment(name, remote_opts.as_ref()).await?
+        openshell_bootstrap::check_existing_deployment(name).await?
     {
         if !should_recreate {
             let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
@@ -1417,24 +1385,11 @@ pub async fn gateway_admin_deploy(
         }
     }
 
-    let mut options = DeployOptions::new(name)
+    let options = DeployOptions::new(name)
         .with_port(port)
         .with_disable_tls(disable_tls)
         .with_disable_gateway_auth(disable_gateway_auth)
-        .with_gpu(gpu)
         .with_recreate(should_recreate);
-    if let Some(opts) = remote_opts {
-        options = options.with_remote(opts);
-    }
-    if let Some(host) = gateway_host {
-        options = options.with_gateway_host(host);
-    }
-    if let Some(username) = registry_username {
-        options = options.with_registry_username(username);
-    }
-    if let Some(token) = registry_token {
-        options = options.with_registry_token(token);
-    }
 
     let handle = deploy_gateway_with_panel(options, name, location).await?;
 
@@ -1481,23 +1436,15 @@ fn resolve_gateway_control_target_from(
     }
 }
 
-fn gateway_control_target_options(
+fn validate_gateway_control_target(
     name: &str,
     remote_override: Option<&str>,
-    ssh_key: Option<&str>,
-) -> Result<Option<RemoteOptions>> {
+) -> Result<()> {
     match resolve_gateway_control_target(name, remote_override) {
-        GatewayControlTarget::Local => Ok(None),
-        GatewayControlTarget::Remote(dest) => {
-            let mut opts = RemoteOptions::new(&dest);
-            if let Some(key) = ssh_key {
-                opts = opts.with_ssh_key(key);
-            }
-            Ok(Some(opts))
-        }
+        GatewayControlTarget::Local | GatewayControlTarget::Remote(_) => Ok(()),
         GatewayControlTarget::ExternalRegistration => Err(miette::miette!(
-            "Gateway '{name}' is an external registration, not a managed Docker gateway.\n\
-             `openshell gateway stop` is only supported for local or SSH-managed gateways."
+            "Gateway '{name}' is an external registration, not a managed gateway.\n\
+             `openshell gateway stop` is only supported for local gateways."
         )),
     }
 }
@@ -1534,12 +1481,12 @@ fn cleanup_gateway_metadata(name: &str) {
 pub async fn gateway_admin_stop(
     name: &str,
     remote: Option<&str>,
-    ssh_key: Option<&str>,
+    _ssh_key: Option<&str>,
 ) -> Result<()> {
-    let remote_opts = gateway_control_target_options(name, remote, ssh_key)?;
+    validate_gateway_control_target(name, remote)?;
 
     eprintln!("• Stopping gateway {name}...");
-    let handle = openshell_bootstrap::gateway_handle(name, remote_opts.as_ref()).await?;
+    let handle = openshell_bootstrap::gateway_handle(name).await?;
     handle.stop().await?;
     eprintln!("{} Gateway {name} stopped.", "✓".green().bold());
     Ok(())
@@ -1562,10 +1509,8 @@ pub async fn gateway_admin_destroy(
             Ok(())
         }
         GatewayControlTarget::Local | GatewayControlTarget::Remote(_) => {
-            let remote_opts = gateway_control_target_options(name, remote, ssh_key)?;
-
             eprintln!("• Destroying gateway {name}...");
-            let handle = openshell_bootstrap::gateway_handle(name, remote_opts.as_ref()).await?;
+            let handle = openshell_bootstrap::gateway_handle(name).await?;
             handle.destroy().await?;
 
             cleanup_gateway_metadata(name);
@@ -1610,37 +1555,16 @@ pub fn gateway_admin_info(name: &str) -> Result<()> {
 
 /// Fetch logs from the gateway Docker container.
 ///
-/// Connects to the Docker daemon (local or remote via SSH) and retrieves
-/// logs from the `openshell-cluster-{name}` container.
+/// Fetch logs from the gateway server process.
 pub async fn doctor_logs(
     name: &str,
     lines: Option<usize>,
     tail: bool,
-    remote: Option<&str>,
-    ssh_key: Option<&str>,
+    _remote: Option<&str>,
+    _ssh_key: Option<&str>,
 ) -> Result<()> {
-    // Build remote options: explicit --remote flag, or auto-resolve from metadata
-    let remote_opts = if let Some(dest) = remote {
-        let mut opts = RemoteOptions::new(dest);
-        if let Some(key) = ssh_key {
-            opts = opts.with_ssh_key(key);
-        }
-        Some(opts)
-    } else if let Some(metadata) = get_gateway_metadata(name)
-        && metadata.is_remote
-        && let Some(ref host) = metadata.remote_host
-    {
-        let mut opts = RemoteOptions::new(host.clone());
-        if let Some(key) = ssh_key {
-            opts = opts.with_ssh_key(key);
-        }
-        Some(opts)
-    } else {
-        None
-    };
-
     let stdout = std::io::stdout().lock();
-    openshell_bootstrap::gateway_container_logs(remote_opts.as_ref(), name, lines, tail, stdout)
+    openshell_bootstrap::gateway_container_logs(name, lines, tail, stdout)
         .await
 }
 
@@ -1750,7 +1674,7 @@ pub fn doctor_llm() -> Result<()> {
 
 /// Validate system prerequisites for running a gateway.
 ///
-/// Checks Docker connectivity and reports the result. Returns exit code 0
+/// Checks Apple Container availability. Returns exit code 0
 /// if all checks pass, 1 otherwise.
 pub async fn doctor_check() -> Result<()> {
     use std::io::Write;
@@ -1758,22 +1682,15 @@ pub async fn doctor_check() -> Result<()> {
 
     writeln!(stdout, "Checking system prerequisites...\n").into_diagnostic()?;
 
-    // --- Docker connectivity ---
-    write!(stdout, "  Docker ............. ").into_diagnostic()?;
+    // --- Apple Container connectivity ---
+    write!(stdout, "  Apple Container .... ").into_diagnostic()?;
     stdout.flush().into_diagnostic()?;
 
-    match openshell_bootstrap::check_docker_available().await {
+    let runtime = openshell_bootstrap::create_runtime().await?;
+    match runtime.check_available().await {
         Ok(preflight) => {
             let version_str = preflight.version.as_deref().unwrap_or("unknown");
             writeln!(stdout, "ok (version {version_str})").into_diagnostic()?;
-
-            // --- DOCKER_HOST ---
-            write!(stdout, "  DOCKER_HOST ........ ").into_diagnostic()?;
-            match std::env::var("DOCKER_HOST") {
-                Ok(val) => writeln!(stdout, "{val}").into_diagnostic()?,
-                Err(_) => writeln!(stdout, "(not set, using default socket)").into_diagnostic()?,
-            };
-
             writeln!(stdout, "\nAll checks passed.").into_diagnostic()?;
             Ok(())
         }
@@ -1867,7 +1784,7 @@ pub async fn sandbox_create_with_bootstrap(
     }
     let requested_gpu = gpu || from.is_some_and(source_requests_gpu);
     let (tls, server, gateway_name) =
-        crate::bootstrap::run_bootstrap(remote, ssh_key, requested_gpu).await?;
+        crate::bootstrap::run_bootstrap().await?;
     // Disable bootstrap inside sandbox_create so that a transient connection
     // failure right after deploy does not trigger a second bootstrap attempt.
     sandbox_create(
@@ -1992,7 +1909,7 @@ pub async fn sandbox_create(
             }
             let requested_gpu = gpu || from.is_some_and(source_requests_gpu);
             let (new_tls, new_server, _) =
-                crate::bootstrap::run_bootstrap(remote, ssh_key, requested_gpu).await?;
+                crate::bootstrap::run_bootstrap().await?;
             let c = grpc_client(&new_server, &new_tls)
                 .await
                 .wrap_err("bootstrap succeeded but failed to connect to gateway")?;
@@ -2577,15 +2494,17 @@ async fn build_from_dockerfile(
         eprintln!("  {msg}");
     };
 
-    openshell_bootstrap::build::build_and_push_image(
-        dockerfile,
-        &tag,
-        context,
-        gateway_name,
-        &HashMap::new(),
-        &mut on_log,
-    )
-    .await?;
+    let runtime = openshell_bootstrap::create_runtime().await?;
+    runtime
+        .build_and_push_image(
+            dockerfile,
+            &tag,
+            context,
+            gateway_name,
+            &HashMap::new(),
+            &mut on_log,
+        )
+        .await?;
 
     eprintln!();
     eprintln!(
@@ -5071,7 +4990,7 @@ mod tests {
             auth_mode: Some("cloudflare_jwt".to_string()),
             edge_team_domain: None,
             edge_auth_url: None,
-            runtime_type: openshell_bootstrap::container_runtime::RuntimeType::Docker,
+            runtime_type: openshell_bootstrap::container_runtime::RuntimeType::AppleContainer,
         }
     }
 
@@ -5460,7 +5379,7 @@ mod tests {
                 auth_mode: None,
                 edge_team_domain: None,
                 edge_auth_url: None,
-                runtime_type: openshell_bootstrap::container_runtime::RuntimeType::Docker,
+                runtime_type: openshell_bootstrap::container_runtime::RuntimeType::AppleContainer,
             },
         ];
 

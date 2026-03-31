@@ -34,13 +34,13 @@ These pipelines connect skills into end-to-end workflows. Individual skill files
 | `crates/openshell-sandbox/` | Sandbox runtime | Container supervision, policy-enforced egress routing |
 | `crates/openshell-policy/` | Policy engine | Filesystem, network, process, and inference constraints |
 | `crates/openshell-router/` | Privacy router | Privacy-aware LLM routing |
-| `crates/openshell-bootstrap/` | Cluster bootstrap | K3s cluster setup, image loading, mTLS PKI |
+| `crates/openshell-bootstrap/` | Cluster bootstrap | Gateway bootstrap, Apple Container sandbox management, PKI |
 | `crates/openshell-core/` | Shared core | Common types, configuration, error handling |
 | `crates/openshell-providers/` | Provider management | Credential provider backends |
 | `crates/openshell-tui/` | Terminal UI | Ratatui-based dashboard for monitoring |
 | `python/openshell/` | Python SDK | Python bindings and CLI packaging |
 | `proto/` | Protobuf definitions | gRPC service contracts |
-| `deploy/` | Docker, Helm, K8s | Dockerfiles, Helm chart, manifests |
+| `deploy/` | Containers, deployment config | Dockerfiles, deployment configuration |
 | `.agents/skills/` | Agent skills | Workflow automation for development |
 | `.agents/agents/` | Agent personas | Sub-agent definitions (e.g., reviewer, doc writer) |
 | `architecture/` | Architecture docs | Design decisions and component documentation |
@@ -93,13 +93,13 @@ These pipelines connect skills into end-to-end workflows. Individual skill files
 
 - Always use `uv` for Python commands (e.g., `uv pip install`, `uv run`, `uv venv`)
 
-## Docker
+## Container Builds
 
-- Always prefer `mise` commands over direct docker builds (e.g., `mise run docker:build` instead of `docker build`)
+- Always prefer `mise` commands. Apple Container handles sandbox images natively.
 
 ## Cluster Infrastructure Changes
 
-- If you change cluster bootstrap infrastructure (e.g., `openshell-bootstrap` crate, `deploy/docker/Dockerfile.images`, `cluster-entrypoint.sh`, `cluster-healthcheck.sh`, deploy logic in `openshell-cli`), update the `debug-openshell-cluster` skill in `.agents/skills/debug-openshell-cluster/SKILL.md` to reflect those changes.
+- If you change cluster bootstrap infrastructure (e.g., `openshell-bootstrap` crate, `crates/openshell-bootstrap/src/runtime_apple.rs`, deploy logic in `openshell-cli`), update the `debug-openshell-cluster` skill in `.agents/skills/debug-openshell-cluster/SKILL.md` to reflect those changes.
 
 ## Documentation
 
