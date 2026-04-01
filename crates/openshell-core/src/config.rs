@@ -349,5 +349,5 @@ const fn default_ssh_session_ttl_secs() -> u64 {
 }
 
 fn default_sandbox_backend() -> String {
-    "kubernetes".to_string()
+    "apple-container".to_string()
 }
