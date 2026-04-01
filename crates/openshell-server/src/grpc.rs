@@ -906,6 +906,7 @@ impl OpenShell for OpenShellService {
             .metadata()
             .get("x-sandbox-id")
             .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
             .ok_or_else(|| Status::permission_denied("missing x-sandbox-id header"))?;
 
         let sandbox_id = request.into_inner().sandbox_id;

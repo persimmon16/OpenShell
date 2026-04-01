@@ -33,6 +33,15 @@ jobs:
       - name: Install mise
         uses: jdx/mise-action@v2
 
+      - name: Install Apple Container
+        env:
+          CONTAINER_VERSION: "0.11.0"
+        run: |
+          curl -fsSL -o container-installer.pkg \
+            "https://github.com/apple/container/releases/download/${CONTAINER_VERSION}/container-${CONTAINER_VERSION}-installer-signed.pkg"
+          sudo installer -pkg container-installer.pkg -target /
+          rm container-installer.pkg
+
       - name: Verify Apple Container
         run: container system info
 
