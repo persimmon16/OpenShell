@@ -36,11 +36,11 @@ The gateway is responsible for:
 - Managing inference configuration and serving inference bundles so sandboxes can route requests to the correct backend.
 - Providing the SSH tunnel endpoint so you can connect to sandboxes without exposing them directly.
 
-The gateway runs inside a Docker container and exposes a single port (gRPC and HTTP multiplexed), secured by mTLS by default. No separate Kubernetes installation is required. It can be deployed locally, on a remote host via SSH, or behind a cloud reverse proxy.
+The gateway runs as a native process and exposes a single port (gRPC and HTTP multiplexed), secured by mTLS by default. The only prerequisite is Apple Container (`container system start`).
 
 ## Deploy a Local Gateway
 
-Deploy a gateway on your workstation. The only prerequisite is a running Docker daemon.
+Deploy a gateway on your workstation.
 
 ```console
 $ openshell gateway start
@@ -62,30 +62,6 @@ To use a different port or name:
 $ openshell gateway start --port 9090
 $ openshell gateway start --name dev-local
 ```
-
-## Deploy a Remote Gateway
-
-Deploy a gateway on a remote machine accessible via SSH. The only dependency on the remote host is Docker.
-
-```console
-$ openshell gateway start --remote user@hostname
-```
-
-The gateway is reachable at `https://<hostname>:8080`.
-
-To specify an SSH key:
-
-```console
-$ openshell gateway start --remote user@hostname --ssh-key ~/.ssh/my_key
-```
-
-:::{note}
-For DGX Spark, use your Spark's mDNS hostname:
-
-```console
-$ openshell gateway start --remote <username>@<spark-ssid>.local
-```
-:::
 
 ## Register an Existing Gateway
 
@@ -213,10 +189,10 @@ $ openshell doctor logs --tail              # stream live
 $ openshell doctor logs --lines 50          # last 50 lines
 ```
 
-Run a command inside the gateway container for deeper inspection:
+Run a command inside the gateway for deeper inspection:
 
 ```console
-$ openshell doctor exec -- kubectl get pods -A
+$ openshell doctor exec -- container list --all
 $ openshell doctor exec -- sh
 ```
 

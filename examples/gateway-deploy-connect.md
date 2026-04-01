@@ -1,12 +1,11 @@
 # Deploying and Connecting to a Gateway
 
-Deploy a OpenShell gateway, verify it is reachable, and run your first
-sandbox. This example covers local, remote, and Cloudflare-fronted
-deployments.
+Deploy an OpenShell gateway, verify it is reachable, and run your first
+sandbox. This example covers local and edge-authenticated deployments.
 
 ## Prerequisites
 
-- Docker daemon running
+- macOS with Apple Container installed
 - OpenShell CLI installed (`openshell`)
 
 ## Local deployment
@@ -17,10 +16,10 @@ deployments.
 openshell gateway start
 ```
 
-This provisions a single-node k3s cluster inside a Docker container,
-deploys the gateway workload, generates mTLS certificates, and stores
-connection artifacts locally. The gateway becomes reachable at
-`https://127.0.0.1:8080` by default.
+This starts the gateway as a native macOS process, generates mTLS
+certificates, and stores connection artifacts locally. Sandboxes run in
+Apple Container VMs using vmnet networking. The gateway becomes
+reachable at `https://127.0.0.1:8080` by default.
 
 ### 2. Verify the gateway is running
 
@@ -49,44 +48,6 @@ openshell sandbox delete hello
 openshell gateway destroy
 ```
 
-## Remote deployment
-
-Deploy the gateway on a remote machine accessible via SSH. The only
-dependency on the remote host is Docker.
-
-### 1. Deploy
-
-```bash
-openshell gateway start --remote user@hostname
-```
-
-The CLI creates an SSH-based Docker client, pulls the cluster image on
-the remote host, and provisions the cluster there. The gateway is
-reachable at `https://<hostname>:8080`.
-
-### 2. Verify and use
-
-```bash
-openshell status
-openshell sandbox create --name remote-test -- echo "running on remote host"
-openshell sandbox connect remote-test
-```
-
-### 3. View gateway logs (optional)
-
-To inspect the gateway container logs:
-
-```bash
-openshell doctor logs
-```
-
-### 4. Clean up
-
-```bash
-openshell sandbox delete remote-test
-openshell gateway destroy
-```
-
 ## Custom port
 
 If port 8080 is in use, specify a different host port:
@@ -101,8 +62,8 @@ resolve it automatically.
 ## Edge-authenticated gateway
 
 For gateways running behind a reverse proxy that handles
-authentication (e.g. Cloudflare Access), no deployment is needed --
-register the endpoint and authenticate via browser:
+authentication (e.g. Cloudflare Access), no local deployment is
+needed -- register the endpoint and authenticate via browser:
 
 ```bash
 openshell gateway add https://gateway.example.com
@@ -146,31 +107,31 @@ openshell gateway select
 Switch the active gateway:
 
 ```bash
-openshell gateway select my-other-cluster
+openshell gateway select my-other-gateway
 ```
 
 Override the active gateway for a single command:
 
 ```bash
-openshell status -g my-other-cluster
+openshell status -g my-other-gateway
 ```
 
 ## How it works
 
 The `gateway start` command:
 
-1. Pulls the OpenShell cluster image and provisions a container.
+1. Starts the gateway as a native macOS process.
 2. Waits for the gateway to become healthy.
 3. Generates mTLS certificates for secure communication.
 4. Stores connection credentials and metadata locally.
-5. Sets the cluster as the active gateway.
+5. Sets the gateway as the active gateway.
 
 All subsequent CLI commands automatically resolve the active gateway
 and authenticate using stored credentials.
 
-For local and remote gateways, the CLI connects directly over mTLS.
-For edge-authenticated gateways, the CLI routes gRPC traffic through
-a local WebSocket tunnel proxy (see
+For local gateways, the CLI connects directly over mTLS. For
+edge-authenticated gateways, the CLI routes gRPC traffic through a
+local WebSocket tunnel proxy (see
 [How edge-authenticated connections differ](#how-edge-authenticated-connections-differ)
 above).
 
@@ -182,10 +143,10 @@ Check gateway deployment details:
 openshell gateway info
 ```
 
-If the gateway is unreachable, inspect the container:
+If the gateway is unreachable, inspect its logs:
 
 ```bash
-docker logs openshell-cluster-openshell
+openshell doctor logs
 ```
 
 Re-running `gateway start` is idempotent -- it reuses existing

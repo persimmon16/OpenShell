@@ -6,23 +6,22 @@ This project is a platform for securely running AI agents in isolated sandbox en
 
 This platform solves that problem by creating sandboxed execution environments where agents run with exactly the permissions they need and nothing more. Every sandbox is governed by a policy that defines which files the agent can access, which network hosts it can reach, and which system operations it can perform. All outbound network traffic is forced through a controlled proxy that inspects and enforces access rules in real time.
 
-The platform packages the entire infrastructure -- orchestration gateway, sandbox runtime, networking, and Kubernetes cluster -- into a single deployable unit. A user can go from zero to a running, secured sandbox in two commands. The system handles cluster provisioning, credential management, policy enforcement, and secure remote access without requiring the user to configure Kubernetes, networking, or security policies manually.
+The gateway runs as a native process and sandboxes are Apple Container VMs. A user can go from zero to a running, secured sandbox in two commands. The system handles provisioning, credential management, policy enforcement, and secure remote access without requiring the user to configure networking or security policies manually.
 
 ## How the Subsystems Fit Together
 
-The following diagram shows how the major subsystems interact at a high level. Users interact through the CLI, which communicates with a central gateway. The gateway manages sandbox lifecycle in Kubernetes, and each sandbox enforces its own policy locally. Inference API calls to `inference.local` are routed locally within the sandbox by an embedded inference router, without traversing the gateway at request time.
+The following diagram shows how the major subsystems interact at a high level. Users interact through the CLI, which communicates with a central gateway. The gateway manages sandbox lifecycle. Sandboxes are Apple Container VMs. Each sandbox enforces its own policy locally. Inference API calls to `inference.local` are routed locally within the sandbox by an embedded inference router, without traversing the gateway at request time.
 
 ```mermaid
 flowchart TB
-    subgraph USER["User's Machine"]
+    subgraph USER["User's Machine (macOS)"]
         CLI["Command-Line Interface"]
+        SERVER["Gateway (native process)"]
+        DB["Database (SQLite)"]
     end
 
-    subgraph CLUSTER["Kubernetes Cluster (single Docker container)"]
-        SERVER["Gateway / Control Plane"]
-        DB["Database (SQLite or Postgres)"]
-
-        subgraph SBX["Sandbox Pod"]
+    subgraph VMS["Apple Container VMs (vmnet)"]
+        subgraph SBX["Sandbox VM"]
             SUPERVISOR["Sandbox Supervisor"]
             PROXY["Network Proxy"]
             ROUTER["Inference Router"]
@@ -32,23 +31,21 @@ flowchart TB
     end
 
     subgraph EXT["External Services"]
-        HOSTS["Allowed Hosts (github.com, api.anthropic.com, ...)"]
-        CREDS["Provider APIs (Claude, GitHub, GitLab, ...)"]
-        BACKEND["Inference Backends (OpenAI, Anthropic, NVIDIA, local)"]
+        HOSTS["Allowed Hosts"]
+        BACKEND["Inference Backends"]
     end
 
     CLI -- "gRPC / HTTPS" --> SERVER
     CLI -- "SSH over HTTP CONNECT" --> SERVER
     SERVER -- "CRUD + Watch" --> DB
-    SERVER -- "Create / Delete Pods" --> SBX
-    SUPERVISOR -- "Fetch Policy + Credentials + Inference Bundle" --> SERVER
+    SERVER -- "container CLI" --> SBX
+    SUPERVISOR -- "Fetch Policy + Credentials" --> SERVER
     SUPERVISOR -- "Spawn + Restrict" --> CHILD
     CHILD -- "All network traffic" --> PROXY
     PROXY -- "Evaluate request" --> OPA
     PROXY -- "Allowed traffic only" --> HOSTS
     PROXY -- "inference.local requests" --> ROUTER
     ROUTER -- "Proxied inference" --> BACKEND
-    SERVER -. "Store / retrieve credentials" .-> CREDS
 ```
 
 ## Major Subsystems
@@ -92,11 +89,11 @@ For more detail, see [Sandbox Architecture](sandbox.md) (Proxy Routing section).
 
 ### Gateway / Control Plane
 
-The gateway is the central orchestration service. It provides the API that the CLI talks to and manages the lifecycle of sandboxes in Kubernetes.
+The gateway is the central orchestration service. It provides the API that the CLI talks to and manages the lifecycle of sandboxes.
 
 Key responsibilities:
 
-- **Sandbox lifecycle management**: Creating, deleting, and monitoring sandboxes. When a user creates a sandbox, the gateway provisions a Kubernetes pod with the correct container image, policy, and environment configuration.
+- **Sandbox lifecycle management**: Creating, deleting, and monitoring sandboxes. When a user creates a sandbox, the gateway provisions an Apple Container VM with the correct container image, policy, and environment configuration.
 - **gRPC and HTTP APIs**: The gateway exposes a gRPC API for structured operations (sandbox CRUD, provider management, SSH session creation) and HTTP endpoints for health checks. Both protocols share a single network port through protocol multiplexing.
 - **Data persistence**: Sandbox records, provider credentials, SSH sessions, and inference routes are stored in a database (SQLite by default, Postgres as an option).
 - **TLS termination**: The gateway supports TLS with automatic protocol negotiation, so gRPC and HTTP clients can connect securely on the same port.
@@ -108,13 +105,12 @@ For more detail, see [Gateway Architecture](gateway.md).
 
 ### Cluster Bootstrap and Infrastructure
 
-The entire platform -- Kubernetes, the gateway, networking, and pre-loaded container images -- is packaged into a single Docker container. This means the only dependency a user needs is Docker.
+The only prerequisite is Apple Container (macOS 15+).
 
 The bootstrap system handles:
 
-- **Provisioning**: Creating the Docker container with an embedded Kubernetes (k3s) cluster, pre-loaded with all required images and Helm charts.
-- **Local and remote deployment**: The same bootstrap flow works for local development (Docker on the user's machine) and remote deployment (Docker on a remote host, accessed via SSH).
-- **Health monitoring**: After starting the cluster, the system polls for readiness -- waiting for Kubernetes to start, for components to deploy, and for health checks to pass.
+- **Provisioning**: Starting the gateway as a native process and managing sandboxes as Apple Container VMs.
+- **Health monitoring**: After starting the gateway, the system polls for readiness -- waiting for the gateway to become healthy and for health checks to pass.
 - **Credential management**: If TLS is enabled, the bootstrap process automatically extracts client certificates and stores them locally for the CLI to use.
 - **Idempotent operation**: Running the deploy command again is safe. It reuses existing infrastructure or recreates only what changed.
 
@@ -122,10 +118,10 @@ The target onboarding experience is two commands:
 
 ```bash
 pip install <package>
-openshell sandbox create --remote user@host -- claude
+openshell sandbox create -- claude
 ```
 
-The first command installs the CLI. The second command bootstraps the cluster on the remote host (if needed) and launches a sandbox running the specified agent.
+The first command installs the CLI. The second command bootstraps the gateway (if needed) and launches a sandbox running the specified agent.
 
 For more detail, see [Cluster Bootstrap Architecture](cluster-single-node.md).
 
@@ -142,7 +138,7 @@ The connection flow works as follows:
 5. The CLI and sandbox exchange SSH traffic bidirectionally through the tunnel.
 
 This design provides several benefits:
-- Sandbox pods are never directly accessible from outside the cluster.
+- Sandbox VMs are never directly accessible from outside the gateway.
 - All access is authenticated and auditable through the gateway.
 - Session tokens can be revoked to immediately cut off access.
 - The same mechanism supports both interactive shells and file synchronization (rsync).
@@ -156,7 +152,7 @@ AI agents typically need credentials to access external services -- an API key f
 The provider system handles:
 
 - **Automatic discovery**: The CLI scans the user's local machine for existing credentials (environment variables, configuration files) and offers to upload them to the gateway. Supported providers include Claude, Codex, OpenCode, OpenAI, Anthropic, NVIDIA, GitHub, GitLab, and others.
-- **Secure storage**: Credentials are stored on the gateway, separate from sandbox definitions. They never appear in Kubernetes pod specifications.
+- **Secure storage**: Credentials are stored on the gateway, separate from sandbox definitions.
 - **Runtime injection**: When a sandbox starts, the supervisor process fetches the credentials from the gateway via gRPC and injects them as environment variables into every process it spawns (both the initial agent process and any SSH sessions).
 - **CLI management**: Users can create, update, list, and delete providers through standard CLI commands.
 
@@ -201,15 +197,7 @@ The inference routing system transparently intercepts AI inference API calls fro
 
 ### Container and Build System
 
-The platform produces three container images:
-
-| Image | Purpose |
-|---|---|
-| **Sandbox** | Runs inside each sandbox pod. Contains the sandbox supervisor binary, Python runtime, and agent tooling. Uses a multi-user setup (privileged supervisor, restricted agent user). |
-| **Gateway** | Runs the control plane. Contains the gateway binary, database migrations, and an embedded SSH client for sandbox management. |
-| **Cluster** | An airgapped Kubernetes image with k3s, pre-loaded sandbox and gateway images, Helm charts, and an API gateway. This is the single container that users deploy. |
-
-Builds use multi-stage Dockerfiles with caching to keep rebuild times fast. A Helm chart handles Kubernetes-level configuration (service ports, health checks, security contexts, resource limits). Build automation is managed through mise tasks.
+Sandbox images are OCI container images pulled directly by Apple Container. They are maintained in the [openshell-community](https://github.com/nvidia/openshell-community) repository. The gateway runs as a native binary, not a container image. Build automation is managed through mise tasks.
 
 For more detail, see [Container Management](build-containers.md).
 
@@ -244,7 +232,7 @@ The CLI resolves which gateway to operate on through a priority chain: explicit 
 
 ## How Users Get Started
 
-The onboarding flow is designed to require minimal setup. Docker is the only prerequisite.
+The onboarding flow is designed to require minimal setup. The only prerequisite is Apple Container (macOS 15+).
 
 **Step 1: Install the CLI.**
 
@@ -258,22 +246,7 @@ pip install <package>
 openshell sandbox create -- claude
 ```
 
-If no cluster exists, the CLI automatically bootstraps one. It provisions a local Kubernetes cluster inside a Docker container, waits for it to become healthy, discovers the user's AI provider credentials from local configuration files, uploads them to the gateway, and launches a sandbox running the specified agent -- all from a single command.
-
-For remote deployment (running the sandbox on a different machine):
-
-```bash
-openshell sandbox create --remote user@hostname -- claude
-```
-
-This performs the same bootstrap flow on the remote host via SSH.
-
-For development and testing against the current checkout, use
-`scripts/remote-deploy.sh` instead. That helper syncs the local repository to
-an SSH-reachable machine, builds the CLI and Docker images on the remote host,
-and then runs `openshell gateway start` there. It defaults to secure gateway
-startup and only enables `--plaintext`, `--disable-gateway-auth`, or
-`--recreate` when explicitly requested.
+If no gateway exists, the CLI automatically bootstraps one. It starts a native gateway process using Apple Container, waits for the gateway to become healthy, discovers the user's AI provider credentials from local configuration files, uploads them to the gateway, and launches a sandbox running the specified agent -- all from a single command.
 
 **Step 3: Connect to a running sandbox.**
 
@@ -287,12 +260,12 @@ This opens an interactive SSH session into the sandbox, with all provider creden
 
 | Document | Description |
 |---|---|
-| [Cluster Bootstrap](cluster-single-node.md) | How the platform bootstraps a Kubernetes cluster from a single Docker container, for local and remote targets. |
+| [Cluster Bootstrap](cluster-single-node.md) | How the platform bootstraps the gateway as a native process using Apple Container. |
 | [Gateway Architecture](gateway.md) | The control plane gateway: API multiplexing, gRPC services, persistence, TLS, and sandbox orchestration. |
 | [Gateway Communication](gateway-deploy-connect.md) | How the CLI resolves a gateway and communicates with it over mTLS, plaintext HTTP/2, or an edge-authenticated WebSocket tunnel. |
 | [Gateway Security](gateway-security.md) | mTLS enforcement, PKI bootstrap, certificate hierarchy, and the gateway trust model. |
 | [Sandbox Architecture](sandbox.md) | The sandbox execution environment: policy enforcement, Landlock, seccomp, network namespaces, and the network proxy. |
-| [Container Management](build-containers.md) | Container images, Dockerfiles, Helm charts, build tasks, and CI/CD. |
+| [Container Management](build-containers.md) | Sandbox container images and build tasks. |
 | [Sandbox Connect](sandbox-connect.md) | SSH tunneling into sandboxes through the gateway. |
 | [Sandbox Custom Containers](sandbox-custom-containers.md) | Building and using custom container images for sandboxes. |
 | [Providers](sandbox-providers.md) | External credential management, auto-discovery, and runtime injection. |

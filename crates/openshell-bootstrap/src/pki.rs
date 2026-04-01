@@ -4,6 +4,7 @@
 use miette::{IntoDiagnostic, Result, WrapErr};
 use rcgen::{BasicConstraints, CertificateParams, DnType, Ia5String, IsCa, KeyPair, SanType};
 use std::net::IpAddr;
+use time::{Duration, OffsetDateTime};
 
 /// All PEM-encoded materials produced by [`generate_pki`].
 #[allow(clippy::struct_field_names)]
@@ -20,22 +21,25 @@ pub struct PkiBundle {
 /// Default SANs always included on the server certificate.
 const DEFAULT_SERVER_SANS: &[&str] = &[
     "openshell",
-    "openshell.openshell.svc",
-    "openshell.openshell.svc.cluster.local",
     "localhost",
-    "host.docker.internal",
+    "host.containers.internal",
     "127.0.0.1",
 ];
+
+/// SANs for the server certificate. `host.containers.internal` is the hostname
+/// Apple Container VMs use to reach the macOS host.
 
 /// Generate a complete PKI bundle: CA, server cert, and client cert.
 ///
 /// `extra_sans` are additional Subject Alternative Names to add to the server
 /// certificate (e.g. the remote host's IP or hostname for remote deployments).
 ///
-/// Certificate validity uses the `rcgen` defaults (1975–4096), which effectively
-/// never expire. This is appropriate for an internal dev-cluster PKI where certs
-/// are ephemeral to the cluster's lifetime.
+/// Certificates are valid for 365 days from generation. Regenerate the PKI
+/// bundle before expiry.
 pub fn generate_pki(extra_sans: &[String]) -> Result<PkiBundle> {
+    let now = OffsetDateTime::now_utc();
+    let expiry = now + Duration::days(365);
+
     // --- CA ---
     let ca_key = KeyPair::generate()
         .into_diagnostic()
@@ -43,7 +47,9 @@ pub fn generate_pki(extra_sans: &[String]) -> Result<PkiBundle> {
     let mut ca_params = CertificateParams::new(Vec::<String>::new())
         .into_diagnostic()
         .wrap_err("failed to create CA params")?;
-    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+    ca_params.not_before = now;
+    ca_params.not_after = expiry;
     ca_params
         .distinguished_name
         .push(DnType::OrganizationName, "openshell");
@@ -65,6 +71,8 @@ pub fn generate_pki(extra_sans: &[String]) -> Result<PkiBundle> {
         .into_diagnostic()
         .wrap_err("failed to create server cert params")?;
     server_params.subject_alt_names = server_sans;
+    server_params.not_before = now;
+    server_params.not_after = expiry;
     server_params
         .distinguished_name
         .push(DnType::CommonName, "openshell-server");
@@ -81,6 +89,8 @@ pub fn generate_pki(extra_sans: &[String]) -> Result<PkiBundle> {
     let mut client_params = CertificateParams::new(Vec::<String>::new())
         .into_diagnostic()
         .wrap_err("failed to create client cert params")?;
+    client_params.not_before = now;
+    client_params.not_after = expiry;
     client_params
         .distinguished_name
         .push(DnType::CommonName, "openshell-client");
@@ -155,4 +165,5 @@ mod tests {
         // Should have all default SANs + 2 extras
         assert_eq!(sans.len(), DEFAULT_SERVER_SANS.len() + 2);
     }
+
 }

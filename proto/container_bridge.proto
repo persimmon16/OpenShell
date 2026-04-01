@@ -1,0 +1,301 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package openshell.bridge.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// ContainerBridge is the gRPC service exposed by the macOS host bridge daemon.
+// The gateway (running inside an Apple Container VM) calls this service to
+// manage sandbox containers via the host's Apple Container runtime.
+//
+// All RPCs require mutual TLS authentication. The gateway presents a client
+// certificate signed by the OpenShell CA, and the bridge presents a server
+// certificate signed by the same CA.
+service ContainerBridge {
+  // Health check for the bridge daemon.
+  rpc Health(HealthRequest) returns (HealthResponse);
+
+  // --- Container lifecycle (sandboxes) ---
+
+  // Create a new container (does not start it).
+  rpc CreateContainer(CreateContainerRequest) returns (ContainerResponse);
+
+  // Start a previously created container.
+  rpc StartContainer(StartContainerRequest) returns (StartContainerResponse);
+
+  // Stop a running container.
+  rpc StopContainer(StopContainerRequest) returns (StopContainerResponse);
+
+  // Delete a container (must be stopped first).
+  rpc DeleteContainer(DeleteContainerRequest) returns (DeleteContainerResponse);
+
+  // Get details of a single container.
+  rpc GetContainer(GetContainerRequest) returns (ContainerResponse);
+
+  // List containers matching optional filters.
+  rpc ListContainers(ListContainersRequest) returns (ListContainersResponse);
+
+  // Watch for container state changes (server streaming).
+  rpc WatchContainers(WatchContainersRequest) returns (stream ContainerEvent);
+
+  // Stream container logs (server streaming).
+  rpc ContainerLogs(ContainerLogsRequest) returns (stream LogChunk);
+
+  // Execute a command inside a running container (server streaming).
+  rpc ExecContainer(ExecContainerRequest) returns (stream ExecEvent);
+
+  // --- Image management ---
+
+  // Pull an image from a registry (server streaming for progress).
+  rpc PullImage(PullImageRequest) returns (stream PullProgress);
+
+  // List locally available images.
+  rpc ListImages(ListImagesRequest) returns (ListImagesResponse);
+
+  // Delete a local image.
+  rpc DeleteImage(DeleteImageRequest) returns (DeleteImageResponse);
+
+  // --- Network ---
+
+  // Create a network for container communication.
+  rpc CreateNetwork(CreateNetworkRequest) returns (NetworkResponse);
+
+  // Delete a network.
+  rpc DeleteNetwork(DeleteNetworkRequest) returns (DeleteNetworkResponse);
+}
+
+// ---------- Health ----------
+
+message HealthRequest {}
+
+message HealthResponse {
+  // Whether the bridge daemon is healthy and can reach the container runtime.
+  bool healthy = 1;
+  // Human-readable status message.
+  string message = 2;
+  // Container runtime version string (e.g., "Apple Container 1.0").
+  string runtime_version = 3;
+}
+
+// ---------- Container lifecycle ----------
+
+message CreateContainerRequest {
+  // Unique name for the container.
+  string name = 1;
+  // Container image reference (e.g., "ghcr.io/nvidia/openshell-sandbox:latest").
+  string image = 2;
+  // Environment variables (key=value).
+  map<string, string> env = 3;
+  // Port mappings (container_port -> host_port).
+  map<uint32, uint32> ports = 4;
+  // Volume mounts (host_path -> container_path).
+  map<string, string> volumes = 5;
+  // Entrypoint command override.
+  repeated string entrypoint = 6;
+  // Command arguments.
+  repeated string command = 7;
+  // CPU limit (number of cores).
+  uint32 cpus = 8;
+  // Memory limit in bytes.
+  uint64 memory_bytes = 9;
+  // Labels for identification and filtering.
+  map<string, string> labels = 10;
+  // Working directory inside the container.
+  string working_dir = 11;
+}
+
+message ContainerResponse {
+  // Container unique identifier (runtime-assigned).
+  string id = 1;
+  // Container name.
+  string name = 2;
+  // Current state.
+  ContainerState state = 3;
+  // Container image reference.
+  string image = 4;
+  // Creation timestamp.
+  google.protobuf.Timestamp created_at = 5;
+  // IP address on the container network (if running).
+  string ip_address = 6;
+  // Labels.
+  map<string, string> labels = 7;
+}
+
+message StartContainerRequest {
+  // Container name or ID.
+  string name = 1;
+}
+
+message StartContainerResponse {}
+
+message StopContainerRequest {
+  // Container name or ID.
+  string name = 1;
+  // Timeout in seconds before force-killing (0 = immediate).
+  uint32 timeout_secs = 2;
+}
+
+message StopContainerResponse {}
+
+message DeleteContainerRequest {
+  // Container name or ID.
+  string name = 1;
+  // Force deletion even if the container is running.
+  bool force = 2;
+}
+
+message DeleteContainerResponse {}
+
+message GetContainerRequest {
+  // Container name or ID.
+  string name = 1;
+}
+
+message ListContainersRequest {
+  // Filter by label (key=value). All specified labels must match.
+  map<string, string> label_selector = 1;
+  // Filter by state. Empty means all states.
+  repeated ContainerState state_filter = 2;
+}
+
+message ListContainersResponse {
+  repeated ContainerResponse containers = 1;
+}
+
+message WatchContainersRequest {
+  // Filter by label (key=value). All specified labels must match.
+  map<string, string> label_selector = 1;
+}
+
+message ContainerEvent {
+  // Type of event.
+  ContainerEventType event_type = 1;
+  // The container that changed.
+  ContainerResponse container = 2;
+  // Event timestamp.
+  google.protobuf.Timestamp timestamp = 3;
+}
+
+message ContainerLogsRequest {
+  // Container name or ID.
+  string name = 1;
+  // Follow log output (like tail -f).
+  bool follow = 2;
+  // Number of most recent lines to return (0 = all).
+  uint32 tail_lines = 3;
+  // Include timestamps in log output.
+  bool timestamps = 4;
+}
+
+message LogChunk {
+  // Log line content.
+  bytes data = 1;
+  // Whether this is from stdout (true) or stderr (false).
+  bool is_stdout = 2;
+  // Timestamp of the log entry (if timestamps were requested).
+  google.protobuf.Timestamp timestamp = 3;
+}
+
+message ExecContainerRequest {
+  // Container name or ID.
+  string name = 1;
+  // Command to execute.
+  repeated string command = 2;
+  // Environment variables for the exec session.
+  map<string, string> env = 3;
+  // Working directory for the command.
+  string working_dir = 4;
+}
+
+message ExecEvent {
+  oneof event {
+    // Stdout data.
+    bytes stdout = 1;
+    // Stderr data.
+    bytes stderr = 2;
+    // Exit code (sent as the final event).
+    int32 exit_code = 3;
+  }
+}
+
+// ---------- Image management ----------
+
+message PullImageRequest {
+  // Image reference to pull (e.g., "ghcr.io/nvidia/openshell-sandbox:latest").
+  string image = 1;
+}
+
+message PullProgress {
+  // Layer or overall progress description.
+  string status = 1;
+  // Bytes completed (for layer downloads).
+  int64 current = 2;
+  // Total bytes expected (for layer downloads).
+  int64 total = 3;
+}
+
+message ListImagesRequest {}
+
+message ListImagesResponse {
+  repeated ImageInfo images = 1;
+}
+
+message ImageInfo {
+  // Image ID (digest).
+  string id = 1;
+  // Repository tags (e.g., ["ghcr.io/nvidia/openshell-sandbox:latest"]).
+  repeated string tags = 2;
+  // Image size in bytes.
+  int64 size_bytes = 3;
+  // Creation timestamp.
+  google.protobuf.Timestamp created_at = 4;
+}
+
+message DeleteImageRequest {
+  // Image reference or ID to delete.
+  string image = 1;
+}
+
+message DeleteImageResponse {}
+
+// ---------- Network ----------
+
+message CreateNetworkRequest {
+  // Network name.
+  string name = 1;
+}
+
+message NetworkResponse {
+  // Network name.
+  string name = 1;
+  // Network ID (runtime-assigned).
+  string id = 2;
+}
+
+message DeleteNetworkRequest {
+  // Network name or ID.
+  string name = 1;
+}
+
+message DeleteNetworkResponse {}
+
+// ---------- Enums ----------
+
+enum ContainerState {
+  CONTAINER_STATE_UNSPECIFIED = 0;
+  CONTAINER_STATE_CREATED = 1;
+  CONTAINER_STATE_RUNNING = 2;
+  CONTAINER_STATE_STOPPED = 3;
+  CONTAINER_STATE_EXITED = 4;
+}
+
+enum ContainerEventType {
+  CONTAINER_EVENT_TYPE_UNSPECIFIED = 0;
+  CONTAINER_EVENT_TYPE_CREATED = 1;
+  CONTAINER_EVENT_TYPE_STARTED = 2;
+  CONTAINER_EVENT_TYPE_STOPPED = 3;
+  CONTAINER_EVENT_TYPE_DELETED = 4;
+}

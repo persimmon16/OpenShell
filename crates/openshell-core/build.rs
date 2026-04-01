@@ -34,6 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "../../proto/sandbox.proto",
         "../../proto/inference.proto",
         "../../proto/test.proto",
+        "../../proto/container_bridge.proto",
     ];
 
     // Configure tonic-build

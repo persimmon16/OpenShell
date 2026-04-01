@@ -181,6 +181,7 @@ mod tests {
                     auth_mode: Some("cloudflare_jwt".to_string()),
                     edge_team_domain: None,
                     edge_auth_url: None,
+                    runtime_type: openshell_bootstrap::RuntimeType::AppleContainer,
                 },
             )
             .unwrap();

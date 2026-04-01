@@ -32,7 +32,7 @@ This page gets you from zero to a running, policy-enforced sandbox in two comman
 
 Before you begin, make sure you have:
 
-- Docker Desktop running on your machine.
+- [Apple Container](https://github.com/apple/container) installed and running (macOS 15+). Install with `brew install container`, then start with `container system start`.
 
 For a complete list of requirements, refer to {doc}`../reference/support-matrix`.
 
@@ -133,9 +133,20 @@ $ openshell sandbox create --from base
 ## Deploy a Gateway (Optional)
 
 Running `openshell sandbox create` without a gateway auto-bootstraps a local one.
-To start the gateway explicitly or deploy to a remote host, choose the tab that matches your setup.
+To start the gateway explicitly or connect to a cloud-hosted gateway, choose the tab that matches your setup.
 
 :::::{tab-set}
+
+::::{tab-item} Local
+
+Start a local gateway:
+
+```console
+$ openshell gateway start
+$ openshell status
+```
+
+::::
 
 ::::{tab-item} Brev
 
@@ -150,23 +161,6 @@ Copy the shareable URL for **port 8080**, which is the gateway endpoint.
 $ openshell gateway add https://<your-port-8080-url>.brevlab.com
 $ openshell status
 ```
-
-::::
-
-::::{tab-item} DGX Spark
-
-:::{note}
-Set up your Spark with NVIDIA Sync first, or make sure SSH access is configured (such as SSH keys added to the host).
-:::
-
-Deploy to a DGX Spark machine over SSH:
-
-```console
-$ openshell gateway start --remote <username>@<spark-ssid>.local
-$ openshell status
-```
-
-After `openshell status` shows the gateway as healthy, all subsequent commands route through the SSH tunnel.
 
 ::::
 

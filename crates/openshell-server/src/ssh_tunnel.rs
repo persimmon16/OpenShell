@@ -13,17 +13,15 @@ use prost::Message;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tracing::{info, warn};
-use uuid::Uuid;
 
 use crate::ServerState;
 use crate::persistence::{ObjectId, ObjectName, ObjectType, Store};
 
 const HEADER_SANDBOX_ID: &str = "x-sandbox-id";
 const HEADER_TOKEN: &str = "x-sandbox-token";
-const PREFACE_MAGIC: &str = "NSSH1";
 
 /// Maximum concurrent SSH tunnel connections per session token.
 const MAX_CONNECTIONS_PER_TOKEN: u32 = 3;
@@ -91,25 +89,13 @@ async fn ssh_connect(
         return StatusCode::PRECONDITION_FAILED.into_response();
     }
 
-    let connect_target = if let Some(status) = sandbox.status.as_ref()
-        && !status.agent_pod.is_empty()
-    {
-        match state.sandbox_client.agent_pod_ip(&status.agent_pod).await {
-            Ok(Some(ip)) => ConnectTarget::Ip(SocketAddr::new(ip, state.config.sandbox_ssh_port)),
-            Ok(None) => return StatusCode::BAD_GATEWAY.into_response(),
-            Err(err) => {
-                warn!(error = %err, "Failed to resolve agent pod IP");
-                return StatusCode::BAD_GATEWAY.into_response();
-            }
+    let connect_target = match state.sandbox_backend.sandbox_ip(&sandbox).await {
+        Ok(Some(ip)) => ConnectTarget::Ip(SocketAddr::new(ip, state.config.sandbox_ssh_port)),
+        Ok(None) => return StatusCode::PRECONDITION_FAILED.into_response(),
+        Err(err) => {
+            warn!(error = %err, "Failed to resolve sandbox IP");
+            return StatusCode::BAD_GATEWAY.into_response();
         }
-    } else if !sandbox.name.is_empty() {
-        let service_host = format!(
-            "{}.{}.svc.cluster.local",
-            sandbox.name, state.config.sandbox_namespace
-        );
-        ConnectTarget::Host(service_host, state.config.sandbox_ssh_port)
-    } else {
-        return StatusCode::PRECONDITION_FAILED.into_response();
     };
     // Enforce per-token concurrent connection limit.
     {
@@ -141,7 +127,6 @@ async fn ssh_connect(
         *count += 1;
     }
 
-    let handshake_secret = state.config.ssh_handshake_secret.clone();
     let sandbox_id_clone = sandbox_id.clone();
     let token_clone = token.clone();
     let state_clone = state.clone();
@@ -153,8 +138,6 @@ async fn ssh_connect(
                 if let Err(err) = handle_tunnel(
                     &mut upgraded,
                     connect_target,
-                    &token_clone,
-                    &handshake_secret,
                     &sandbox_id_clone,
                 )
                 .await
@@ -178,8 +161,6 @@ async fn ssh_connect(
 async fn handle_tunnel(
     upgraded: &mut Upgraded,
     target: ConnectTarget,
-    token: &str,
-    secret: &str,
     sandbox_id: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // The sandbox pod may not be network-reachable immediately after the CRD
@@ -199,7 +180,6 @@ async fn handle_tunnel(
     ];
     let target_desc = match &target {
         ConnectTarget::Ip(addr) => format!("{addr}"),
-        ConnectTarget::Host(host, port) => format!("{host}:{port}"),
     };
     info!(sandbox_id = %sandbox_id, target = %target_desc, "SSH tunnel: connecting to sandbox");
     for (attempt, delay) in std::iter::once(&Duration::ZERO)
@@ -212,7 +192,6 @@ async fn handle_tunnel(
         }
         let result = match &target {
             ConnectTarget::Ip(addr) => TcpStream::connect(addr).await,
-            ConnectTarget::Host(host, port) => TcpStream::connect((host.as_str(), *port)).await,
         };
         match result {
             Ok(stream) => {
@@ -235,19 +214,10 @@ async fn handle_tunnel(
         format!("failed to connect to sandbox after retries: {err}")
     })?;
     upstream.set_nodelay(true)?;
-    info!(sandbox_id = %sandbox_id, "SSH tunnel: sending NSSH1 handshake preface");
-    let preface = build_preface(token, secret)?;
-    upstream.write_all(preface.as_bytes()).await?;
 
-    info!(sandbox_id = %sandbox_id, "SSH tunnel: waiting for handshake response");
-    let mut response = String::new();
-    read_line(&mut upstream, &mut response).await?;
-    info!(sandbox_id = %sandbox_id, response = %response.trim(), "SSH tunnel: handshake response received");
-    if response.trim() != "OK" {
-        return Err("sandbox handshake rejected".into());
-    }
-
-    info!(sandbox_id = %sandbox_id, "SSH tunnel established");
+    // Apple Container sandboxes use plain openssh-server without
+    // the NSSH1 handshake protocol. Connect directly.
+    info!(sandbox_id = %sandbox_id, "SSH tunnel established (direct, no NSSH1 handshake)");
     let mut upgraded = TokioIo::new(upgraded);
     // Discard the result entirely – connection-close errors are expected when
     // the SSH session ends and do not represent a failure worth propagating.
@@ -273,58 +243,6 @@ fn header_value(headers: &http::HeaderMap, name: &str) -> Result<String, StatusC
     Ok(value)
 }
 
-fn build_preface(
-    token: &str,
-    secret: &str,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let timestamp = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| "time error")?
-            .as_secs(),
-    )
-    .map_err(|_| "time error")?;
-    let nonce = Uuid::new_v4().to_string();
-    let payload = format!("{token}|{timestamp}|{nonce}");
-    let signature = hmac_sha256(secret.as_bytes(), payload.as_bytes());
-    Ok(format!(
-        "{PREFACE_MAGIC} {token} {timestamp} {nonce} {signature}\n"
-    ))
-}
-
-async fn read_line(
-    stream: &mut TcpStream,
-    buf: &mut String,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut bytes = Vec::new();
-    loop {
-        let mut byte = [0u8; 1];
-        let n = stream.read(&mut byte).await?;
-        if n == 0 {
-            break;
-        }
-        if byte[0] == b'\n' {
-            break;
-        }
-        bytes.push(byte[0]);
-        if bytes.len() > 1024 {
-            break;
-        }
-    }
-    *buf = String::from_utf8_lossy(&bytes).to_string();
-    Ok(())
-}
-
-fn hmac_sha256(key: &[u8], data: &[u8]) -> String {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("hmac key");
-    mac.update(data);
-    let result = mac.finalize().into_bytes();
-    hex::encode(result)
-}
-
 impl ObjectType for SshSession {
     fn object_type() -> &'static str {
         "ssh_session"
@@ -345,7 +263,6 @@ impl ObjectName for SshSession {
 
 enum ConnectTarget {
     Ip(SocketAddr),
-    Host(String, u16),
 }
 
 /// Decrement a connection count entry, removing it if it reaches zero.

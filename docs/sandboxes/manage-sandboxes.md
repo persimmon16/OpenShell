@@ -30,9 +30,7 @@ content:
 This page covers creating sandboxes and managing them. For background on what sandboxes are and how isolation works, refer to [About Sandboxes](index.md).
 
 :::{important}
-Docker must be running before you create a gateway or sandbox. If it is not, the CLI
-returns a connection-refused error (`os error 61`) without explaining
-the cause. Start Docker and try again.
+Apple Container must be running before you create a gateway or sandbox. Run `container system start` if needed. If the runtime is not available, the CLI returns a connection-refused error (`os error 61`) without explaining the cause.
 :::
 
 ## Create a Sandbox

@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Apple Container tasks (macOS only).
+
+[tasks."apple:build"]
+description = "Build the Swift bridge daemon and gateway Containerfile"
+run = """
+cd container-bridge && swift build -c release
+echo "Bridge built: container-bridge/.build/release/container-bridge"
+"""
+
+[tasks."apple:start"]
+description = "Start the container bridge daemon"
+run = """
+cd container-bridge
+.build/release/container-bridge --port 50052 &
+echo "Bridge daemon started on port 50052"
+"""
+
+[tasks."apple:stop"]
+description = "Stop the container bridge daemon"
+run = "killall container-bridge 2>/dev/null || echo 'Bridge daemon not running'"
+
+[tasks."apple:test"]
+description = "Run macOS E2E tests using Apple Container"
+depends = ["apple:build"]
+run = """
+echo "Starting bridge daemon..."
+cd container-bridge
+.build/release/container-bridge --port 50052 &
+BRIDGE_PID=$!
+sleep 2
+
+echo "Running E2E tests..."
+cargo test -p openshell-bootstrap
+
+echo "Stopping bridge daemon..."
+kill $BRIDGE_PID 2>/dev/null || true
+"""

@@ -4,6 +4,8 @@ Demonstrates the `allowed_ips` sandbox policy feature, which lets sandboxes
 reach services on private IP space (e.g. cluster-internal pods) that would
 normally be blocked by the proxy's SSRF protection.
 
+**Note:** This example needs updating for Apple Container. The Docker and kubectl commands shown below are from the legacy Linux deployment path.
+
 ## How it works
 
 The sandbox proxy blocks all connections to RFC 1918 addresses by default.
@@ -12,7 +14,7 @@ proxy validates the resolved IP against that CIDR allowlist instead of
 blanket-blocking. Loopback and link-local remain always-blocked regardless.
 
 The default sandbox policy (baked into the community base image) includes a `cluster_pods`
-entry that allows any binary to reach port 8080 on the k3s pod network:
+entry that allows any binary to reach port 8080 on the sandbox network:
 
 ```yaml
 cluster_pods:

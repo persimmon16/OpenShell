@@ -15,10 +15,8 @@ python.precompiled_flavor = "install_only_stripped"
 [tools]
 python = "3.13.12"
 rust = "stable"
-kubectl = "1.35.1"
 uv = "0.10.2"
 protoc = "29.6"
-helm = "4.1.1"
 "ubi:mozilla/sccache" = { version = "0.14.0", matching = "sccache-v" }
 "ubi:anchore/syft" = { version = "1.42.2", matching = "syft_" }
 "ubi:EmbarkStudios/cargo-about" = "0.8.4"
@@ -28,7 +26,6 @@ _.path = ["{{config_root}}/scripts/bin"]
 _.python.venv = { path = ".venv", create = true }
 _.file = [".env"]
 
-KUBECONFIG = "{{config_root}}/kubeconfig"
 UV_CACHE_DIR = "{{config_root}}/.cache/uv"
 
 # Enable sccache for faster Rust builds.
@@ -36,9 +33,6 @@ UV_CACHE_DIR = "{{config_root}}/.cache/uv"
 # via repository variables to use a shared memcached backend instead.
 RUSTC_WRAPPER = "sccache"
 SCCACHE_DIR = "{{config_root}}/.cache/sccache"
-
-# Shared build constants (overridable via environment)
-DOCKER_BUILDKIT = "1"
 
 [vars]
 # Python paths to include in formatting/linting

@@ -68,7 +68,7 @@ pub const MAX_PAGE_SIZE: u32 = 1000;
 // enough for legitimate payloads while capping resource-exhaustion vectors.
 // ---------------------------------------------------------------------------
 
-/// Maximum length for a sandbox or provider name (Kubernetes name limit).
+/// Maximum length for a sandbox or provider name.
 const MAX_NAME_LEN: usize = 253;
 
 /// Maximum number of providers that can be attached to a sandbox.
@@ -205,12 +205,12 @@ impl OpenShell for OpenShellService {
         let mut spec = spec;
         let template = spec.template.get_or_insert_with(SandboxTemplate::default);
         if template.image.is_empty() {
-            template.image = self.state.sandbox_client.default_image().to_string();
+            template.image = self.state.sandbox_backend.default_image().to_string();
         }
 
         if spec.gpu {
             self.state
-                .sandbox_client
+                .sandbox_backend
                 .validate_gpu_support()
                 .await
                 .map_err(|status| {
@@ -232,12 +232,10 @@ impl OpenShell for OpenShellService {
         } else {
             request.name.clone()
         };
-        let namespace = self.state.config.sandbox_namespace.clone();
-
         let sandbox = Sandbox {
             id: id.clone(),
             name: name.clone(),
-            namespace,
+            namespace: String::new(),
             spec: Some(spec),
             status: None,
             phase: SandboxPhase::Provisioning as i32,
@@ -271,38 +269,40 @@ impl OpenShell for OpenShellService {
             .await
             .map_err(|e| Status::internal(format!("persist sandbox failed: {e}")))?;
 
-        // Now create the Kubernetes resource.  If this fails, clean up
+        // Create the sandbox via the backend. If this fails, clean up
         // the store entry to avoid orphans.
-        match self.state.sandbox_client.create(&sandbox).await {
-            Ok(_) => {}
-            Err(kube::Error::Api(err)) if err.code == 409 => {
-                // Clean up the store entry we just wrote.
-                let _ = self.state.store.delete("sandbox", &id).await;
-                self.state.sandbox_index.remove_sandbox(&id);
-                warn!(
-                    sandbox_id = %id,
-                    sandbox_name = %name,
-                    "Sandbox already exists in Kubernetes"
-                );
-                return Err(Status::already_exists("sandbox already exists"));
-            }
-            Err(err) => {
-                // Clean up the store entry we just wrote.
-                let _ = self.state.store.delete("sandbox", &id).await;
-                self.state.sandbox_index.remove_sandbox(&id);
-                warn!(
-                    sandbox_id = %id,
-                    sandbox_name = %name,
-                    error = %err,
-                    "CreateSandbox request failed"
-                );
-                return Err(Status::internal(format!(
-                    "create sandbox in kubernetes failed: {err}"
-                )));
-            }
+        if let Err(status) = self.state.sandbox_backend.create(&sandbox).await {
+            let _ = self.state.store.delete("sandbox", &id).await;
+            self.state.sandbox_index.remove_sandbox(&id);
+            warn!(
+                sandbox_id = %id,
+                sandbox_name = %name,
+                error = %status,
+                "CreateSandbox request failed"
+            );
+            return Err(status);
         }
 
         self.state.sandbox_watch_bus.notify(&id);
+
+        // Schedule a delayed transition to Ready.
+        // The CLI watch expects to see Provisioning → Ready, so we return the
+        // response (with phase=Provisioning) first, letting the CLI set up its
+        // watch, then update to Ready via a spawned task.
+        {
+            let state = self.state.clone();
+            let ready_id = id.clone();
+            tokio::spawn(async move {
+                // Brief delay so the CLI's watch stream can subscribe first.
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if let Ok(Some(mut sb)) = state.store.get_message::<Sandbox>(&ready_id).await {
+                    sb.phase = SandboxPhase::Ready as i32;
+                    state.sandbox_index.update_from_sandbox(&sb);
+                    let _ = state.store.put_message(&sb).await;
+                    state.sandbox_watch_bus.notify(&ready_id);
+                }
+            });
+        }
 
         info!(
             sandbox_id = %id,
@@ -446,7 +446,7 @@ impl OpenShell for OpenShellService {
             }
 
             // Replay buffered platform events (best-effort) so late subscribers
-            // see Kubernetes events (Scheduled, Pulling, etc.) that already fired.
+            // see provisioning events that already fired.
             if follow_events {
                 for evt in state
                     .tracing_log_bus
@@ -669,18 +669,16 @@ impl OpenShell for OpenShellService {
             );
         }
 
-        let deleted = match self.state.sandbox_client.delete(&sandbox.name).await {
+        let deleted = match self.state.sandbox_backend.delete(&sandbox.name).await {
             Ok(deleted) => deleted,
-            Err(err) => {
+            Err(status) => {
                 warn!(
                     sandbox_id = %id,
                     sandbox_name = %sandbox.name,
-                    error = %err,
+                    error = %status,
                     "DeleteSandbox request failed"
                 );
-                return Err(Status::internal(format!(
-                    "delete sandbox in kubernetes failed: {err}"
-                )));
+                return Err(status);
             }
         };
 
@@ -915,7 +913,23 @@ impl OpenShell for OpenShellService {
         &self,
         request: Request<GetSandboxProviderEnvironmentRequest>,
     ) -> Result<Response<GetSandboxProviderEnvironmentResponse>, Status> {
+        // Verify caller identity: the requesting sandbox must only access its
+        // own provider environment. The x-sandbox-id metadata header is set by
+        // the sandbox supervisor when it calls back to the gateway.
+        let caller_sandbox_id = request
+            .metadata()
+            .get("x-sandbox-id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+            .ok_or_else(|| Status::permission_denied("missing x-sandbox-id header"))?;
+
         let sandbox_id = request.into_inner().sandbox_id;
+
+        if caller_sandbox_id != sandbox_id {
+            return Err(Status::permission_denied(
+                "cannot access another sandbox's provider environment",
+            ));
+        }
 
         let sandbox = self
             .state
@@ -2510,7 +2524,7 @@ async fn require_no_global_policy(state: &ServerState) -> Result<(), Status> {
 }
 
 async fn merge_chunk_into_policy(
-    store: &crate::persistence::Store,
+    store: &Store,
     sandbox_id: &str,
     chunk: &DraftChunkRecord,
 ) -> Result<(i64, String), Status> {
@@ -3232,7 +3246,7 @@ fn validate_sandbox_template(tmpl: &SandboxTemplate) -> Result<(), Status> {
 
 /// Validate a `map<string, string>` field: entry count, key length, value length.
 fn validate_string_map(
-    map: &std::collections::HashMap<String, String>,
+    map: &HashMap<String, String>,
     max_entries: usize,
     max_key_len: usize,
     max_value_len: usize,
@@ -3431,23 +3445,16 @@ async fn resolve_sandbox_exec_target(
     state: &ServerState,
     sandbox: &Sandbox,
 ) -> Result<(String, u16), Status> {
-    if let Some(status) = sandbox.status.as_ref()
-        && !status.agent_pod.is_empty()
-    {
-        match state.sandbox_client.agent_pod_ip(&status.agent_pod).await {
-            Ok(Some(ip)) => {
-                return Ok((ip.to_string(), state.config.sandbox_ssh_port));
-            }
-            Ok(None) => {
-                return Err(Status::failed_precondition(
-                    "sandbox agent pod IP is not available",
-                ));
-            }
-            Err(err) => {
-                return Err(Status::internal(format!(
-                    "failed to resolve agent pod IP: {err}"
-                )));
-            }
+    // Try resolving the sandbox IP via the backend.
+    match state.sandbox_backend.sandbox_ip(sandbox).await {
+        Ok(Some(ip)) => {
+            return Ok((ip.to_string(), state.config.sandbox_ssh_port));
+        }
+        Ok(None) => {
+            // Fall through to DNS/name-based resolution.
+        }
+        Err(err) => {
+            return Err(err);
         }
     }
 
@@ -3455,13 +3462,10 @@ async fn resolve_sandbox_exec_target(
         return Err(Status::failed_precondition("sandbox has no name"));
     }
 
-    Ok((
-        format!(
-            "{}.{}.svc.cluster.local",
-            sandbox.name, state.config.sandbox_namespace
-        ),
-        state.config.sandbox_ssh_port,
-    ))
+    Err(Status::internal(format!(
+        "sandbox backend returned no exec target for {}",
+        sandbox.name
+    )))
 }
 
 /// Maximum number of arguments in the command array.
@@ -3589,14 +3593,14 @@ fn build_remote_exec_command(req: &ExecSandboxRequest) -> Result<String, String>
 /// to inject into the sandbox. When duplicate keys appear across providers, the
 /// first provider's value wins.
 async fn resolve_provider_environment(
-    store: &crate::persistence::Store,
+    store: &Store,
     provider_names: &[String],
-) -> Result<std::collections::HashMap<String, String>, Status> {
+) -> Result<HashMap<String, String>, Status> {
     if provider_names.is_empty() {
-        return Ok(std::collections::HashMap::new());
+        return Ok(HashMap::new());
     }
 
-    let mut env = std::collections::HashMap::new();
+    let mut env = HashMap::new();
 
     for name in provider_names {
         let provider = store
@@ -3680,7 +3684,7 @@ async fn stream_exec_over_ssh(
     );
 
     // Retry loop: the sandbox SSH server may not be accepting connections yet
-    // even though the pod is marked Ready by Kubernetes. We retry transient
+    // even though the sandbox is marked ready. We retry transient
     // connection errors with exponential backoff.
     let (exit_code, proxy_task) = {
         let mut last_err: Option<Status> = None;
@@ -4064,7 +4068,7 @@ fn redact_provider_credentials(mut provider: Provider) -> Provider {
 }
 
 async fn create_provider_record(
-    store: &crate::persistence::Store,
+    store: &Store,
     mut provider: Provider,
 ) -> Result<Provider, Status> {
     if provider.name.is_empty() {
@@ -4102,7 +4106,7 @@ async fn create_provider_record(
 }
 
 async fn get_provider_record(
-    store: &crate::persistence::Store,
+    store: &Store,
     name: &str,
 ) -> Result<Provider, Status> {
     if name.is_empty() {
@@ -4118,7 +4122,7 @@ async fn get_provider_record(
 }
 
 async fn list_provider_records(
-    store: &crate::persistence::Store,
+    store: &Store,
     limit: u32,
     offset: u32,
 ) -> Result<Vec<Provider>, Status> {
@@ -4143,9 +4147,9 @@ async fn list_provider_records(
 /// - Otherwise, upsert all incoming entries into `existing`.
 /// - Entries with an empty-string value are removed (delete semantics).
 fn merge_map(
-    mut existing: std::collections::HashMap<String, String>,
-    incoming: std::collections::HashMap<String, String>,
-) -> std::collections::HashMap<String, String> {
+    mut existing: HashMap<String, String>,
+    incoming: HashMap<String, String>,
+) -> HashMap<String, String> {
     if incoming.is_empty() {
         return existing;
     }
@@ -4160,7 +4164,7 @@ fn merge_map(
 }
 
 async fn update_provider_record(
-    store: &crate::persistence::Store,
+    store: &Store,
     provider: Provider,
 ) -> Result<Provider, Status> {
     if provider.name.is_empty() {
@@ -4204,7 +4208,7 @@ async fn update_provider_record(
 }
 
 async fn delete_provider_record(
-    store: &crate::persistence::Store,
+    store: &Store,
     name: &str,
 ) -> Result<bool, Status> {
     if name.is_empty() {

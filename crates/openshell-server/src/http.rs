@@ -22,12 +22,12 @@ async fn health() -> impl IntoResponse {
     StatusCode::OK
 }
 
-/// Kubernetes liveness probe.
+/// Liveness probe.
 async fn healthz() -> impl IntoResponse {
     StatusCode::OK
 }
 
-/// Kubernetes readiness probe with detailed status.
+/// Readiness probe with detailed status.
 async fn readyz() -> impl IntoResponse {
     let response = HealthResponse {
         status: "healthy",

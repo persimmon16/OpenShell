@@ -402,27 +402,24 @@ git diff --name-only main -- e2e/
 
 If there are no changes under `e2e/`, skip this phase entirely.
 
-If E2E files were modified, deploy to the local cluster and run the E2E test suite:
+If E2E files were modified, run the E2E test suite:
 
 ```bash
-# Deploy all changes to the local k3s cluster
-mise run cluster:deploy
-
 # Run the E2E sandbox tests
 mise run test:e2e:sandbox
 ```
 
-`mise run test:e2e:sandbox` depends on `cluster:deploy` and `python:proto`, then runs `uv run pytest -o python_files='test_*.py' e2e/python`. However, since the cluster may need explicit deploy for code changes beyond just E2E test files, always run `mise run cluster:deploy` first as a separate step to ensure all sandbox/proxy/policy changes are live on the cluster before running E2E tests.
+`mise run test:e2e:sandbox` depends on `python:proto`, then runs `uv run pytest -o python_files='test_*.py' e2e/python`. Ensure the gateway is running and all sandbox/proxy/policy changes are live before running E2E tests.
 
 **E2E retry loop** (up to 3 attempts):
 
-1. Run `mise run cluster:deploy` (only on the first attempt, or if code was changed between attempts).
+1. Ensure the gateway is running with the latest changes.
 2. Run `mise run test:e2e:sandbox`.
 3. If tests fail:
    - Read the pytest output carefully — identify which tests failed and why.
    - Distinguish between **test bugs** (the test itself is wrong) and **implementation bugs** (the code under test is wrong).
    - Fix the failing code or tests.
-   - If code changes were made (not just test fixes), re-run `mise run cluster:deploy` before retrying.
+   - If code changes were made (not just test fixes), restart the gateway before retrying.
    - Decrement the retry counter and try again.
 4. If tests pass, Phase 2 is green.
 
@@ -578,7 +575,7 @@ Local E2E tests passed. CI does not currently run E2E tests, so this comment ser
 |-------|-------|
 | **Commit** | `<commit-sha>` |
 | **Command** | `mise run test:e2e:sandbox` |
-| **Cluster deploy** | `mise run cluster:deploy` (completed before test run) |
+| **Gateway** | Running with latest changes |
 | **Result** | ✅ All passed |
 
 ### Test Summary
@@ -646,7 +643,7 @@ If the `state:in-progress` label is present, the skill was previously started bu
 | `gh pr create --title "..." --body "..."` | Create a pull request |
 | `gh api user --jq '.login'` | Get current GitHub username |
 | `mise run pre-commit` | Run pre-commit checks (includes unit tests, lint, format) |
-| `mise run cluster:deploy` | Deploy all changes to local k3s cluster |
+| `openshell gateway start` | Start or restart the local gateway |
 | `mise run test:e2e:sandbox` | Run E2E sandbox tests (depends on cluster:deploy) |
 
 ## Example Usage

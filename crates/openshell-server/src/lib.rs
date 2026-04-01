@@ -28,15 +28,16 @@ use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
+use tokio::sync::broadcast;
 use tracing::{debug, error, info};
 
 pub use grpc::OpenShellService;
 pub use http::{health_router, http_router};
 pub use multiplex::{MultiplexService, MultiplexedService};
 use persistence::Store;
-use sandbox::{SandboxClient, spawn_sandbox_watcher, spawn_store_reconciler};
+use sandbox::SandboxBackend;
 use sandbox_index::SandboxIndex;
-use sandbox_watch::{SandboxWatchBus, spawn_kube_event_tailer};
+use sandbox_watch::SandboxWatchBus;
 pub use tls::TlsAcceptor;
 use tracing_bus::TracingLogBus;
 
@@ -49,8 +50,8 @@ pub struct ServerState {
     /// Persistence store.
     pub store: Arc<Store>,
 
-    /// Kubernetes sandbox client.
-    pub sandbox_client: SandboxClient,
+    /// Sandbox backend — Apple Container.
+    pub sandbox_backend: SandboxBackend,
 
     /// In-memory sandbox correlation index.
     pub sandbox_index: SandboxIndex,
@@ -74,6 +75,45 @@ pub struct ServerState {
     pub settings_mutex: tokio::sync::Mutex<()>,
 }
 
+/// Listen for shutdown signals (SIGTERM/SIGINT on Unix, Ctrl-C on others).
+///
+/// Returns a receiver that closes when shutdown is initiated.
+#[cfg(unix)]
+async fn listen_for_shutdown() -> broadcast::Receiver<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let (tx, rx) = broadcast::channel(1);
+    let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+    let mut sigint = signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
+
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM");
+            }
+            _ = sigint.recv() => {
+                info!("Received SIGINT");
+            }
+        }
+        let _ = tx.send(());
+    });
+
+    rx
+}
+
+#[cfg(not(unix))]
+async fn listen_for_shutdown() -> broadcast::Receiver<()> {
+    let (tx, rx) = broadcast::channel(1);
+
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        info!("Received Ctrl-C");
+        let _ = tx.send(());
+    });
+
+    rx
+}
+
 fn is_benign_tls_handshake_failure(error: &std::io::Error) -> bool {
     matches!(
         error.kind(),
@@ -87,7 +127,7 @@ impl ServerState {
     pub fn new(
         config: Config,
         store: Arc<Store>,
-        sandbox_client: SandboxClient,
+        sandbox_backend: SandboxBackend,
         sandbox_index: SandboxIndex,
         sandbox_watch_bus: SandboxWatchBus,
         tracing_log_bus: TracingLogBus,
@@ -95,7 +135,7 @@ impl ServerState {
         Self {
             config,
             store,
-            sandbox_client,
+            sandbox_backend,
             sandbox_index,
             sandbox_watch_bus,
             tracing_log_bus,
@@ -125,19 +165,18 @@ pub async fn run_server(config: Config, tracing_log_bus: TracingLogBus) -> Resul
     }
 
     let store = Store::connect(database_url).await?;
-    let sandbox_client = SandboxClient::new(
-        config.sandbox_namespace.clone(),
-        config.sandbox_image.clone(),
-        config.sandbox_image_pull_policy.clone(),
-        config.grpc_endpoint.clone(),
-        format!("0.0.0.0:{}", config.sandbox_ssh_port),
-        config.ssh_handshake_secret.clone(),
-        config.ssh_handshake_skew_secs,
-        config.client_tls_secret_name.clone(),
-        config.host_gateway_ip.clone(),
-    )
-    .await
-    .map_err(|e| Error::execution(format!("failed to create kubernetes client: {e}")))?;
+
+    // Initialize the Apple Container sandbox backend.
+    info!("Initializing Apple Container sandbox backend");
+    let sandbox_backend =
+        SandboxBackend::AppleContainer(sandbox::apple_container::AppleContainerSandboxClient::new(
+            config.sandbox_image.clone(),
+            config.grpc_endpoint.clone(),
+            format!("0.0.0.0:{}", config.sandbox_ssh_port),
+            config.ssh_handshake_secret.clone(),
+            config.ssh_handshake_skew_secs,
+        ));
+
     let store = Arc::new(store);
 
     let sandbox_index = SandboxIndex::new();
@@ -145,27 +184,12 @@ pub async fn run_server(config: Config, tracing_log_bus: TracingLogBus) -> Resul
     let state = Arc::new(ServerState::new(
         config.clone(),
         store.clone(),
-        sandbox_client,
+        sandbox_backend,
         sandbox_index,
         sandbox_watch_bus,
         tracing_log_bus,
     ));
 
-    spawn_sandbox_watcher(
-        store.clone(),
-        state.sandbox_client.clone(),
-        state.sandbox_index.clone(),
-        state.sandbox_watch_bus.clone(),
-        state.tracing_log_bus.clone(),
-    );
-    spawn_store_reconciler(
-        store.clone(),
-        state.sandbox_client.clone(),
-        state.sandbox_index.clone(),
-        state.sandbox_watch_bus.clone(),
-        state.tracing_log_bus.clone(),
-    );
-    spawn_kube_event_tailer(state.clone());
     ssh_tunnel::spawn_session_reaper(store.clone(), std::time::Duration::from_secs(3600));
 
     // Create the multiplexed service
@@ -191,44 +215,58 @@ pub async fn run_server(config: Config, tracing_log_bus: TracingLogBus) -> Resul
         None
     };
 
-    // Accept connections
+    // Accept connections with graceful shutdown support
+    let mut shutdown_rx = listen_for_shutdown().await;
+
     loop {
-        let (stream, addr) = match listener.accept().await {
-            Ok(conn) => conn,
-            Err(e) => {
-                error!(error = %e, "Failed to accept connection");
-                continue;
-            }
-        };
+        tokio::select! {
+            accept_result = listener.accept() => {
+                let (stream, addr) = match accept_result {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        error!(error = %e, "Failed to accept connection");
+                        continue;
+                    }
+                };
 
-        let service = service.clone();
+                let service = service.clone();
 
-        if let Some(ref acceptor) = tls_acceptor {
-            let tls_acceptor = acceptor.clone();
-            tokio::spawn(async move {
-                match tls_acceptor.inner().accept(stream).await {
-                    Ok(tls_stream) => {
-                        if let Err(e) = service.serve(tls_stream).await {
+                if let Some(ref acceptor) = tls_acceptor {
+                    let tls_acceptor = acceptor.clone();
+                    tokio::spawn(async move {
+                        match tls_acceptor.inner().accept(stream).await {
+                            Ok(tls_stream) => {
+                                if let Err(e) = service.serve(tls_stream).await {
+                                    error!(error = %e, client = %addr, "Connection error");
+                                }
+                            }
+                            Err(e) => {
+                                if is_benign_tls_handshake_failure(&e) {
+                                    debug!(error = %e, client = %addr, "TLS handshake closed early");
+                                } else {
+                                    error!(error = %e, client = %addr, "TLS handshake failed");
+                                }
+                            }
+                        }
+                    });
+                } else {
+                    tokio::spawn(async move {
+                        if let Err(e) = service.serve(stream).await {
                             error!(error = %e, client = %addr, "Connection error");
                         }
-                    }
-                    Err(e) => {
-                        if is_benign_tls_handshake_failure(&e) {
-                            debug!(error = %e, client = %addr, "TLS handshake closed early");
-                        } else {
-                            error!(error = %e, client = %addr, "TLS handshake failed");
-                        }
-                    }
+                    });
                 }
-            });
-        } else {
-            tokio::spawn(async move {
-                if let Err(e) = service.serve(stream).await {
-                    error!(error = %e, client = %addr, "Connection error");
-                }
-            });
+            }
+            _ = shutdown_rx.recv() => {
+                info!("Shutdown signal received, stopping acceptance of new connections");
+                break;
+            }
         }
     }
+
+    info!("Graceful shutdown complete");
+
+    Ok(())
 }
 
 #[cfg(test)]

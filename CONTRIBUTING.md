@@ -118,7 +118,7 @@ Project requirements:
 
 - Rust 1.88+
 - Python 3.12+
-- Docker (running)
+- Apple Container (must be running)
 
 ## Getting Started
 
@@ -144,22 +144,34 @@ openshell --help
 openshell sandbox create -- codex
 ```
 
-### Cluster debugging helpers
+### Apple Container (macOS)
 
-Two additional scripts in `scripts/bin/` provide gateway-aware wrappers for cluster debugging:
+OpenShell uses Apple Container. The gateway runs as a native macOS process and sandboxes are Apple Container VMs.
 
-| Script    | What it does                                                                         |
-| --------- | ------------------------------------------------------------------------------------ |
-| `kubectl` | Runs `kubectl` inside the active gateway's k3s container via `openshell doctor exec` |
-| `k9s`     | Runs `k9s` inside the active gateway's k3s container via `openshell doctor exec`     |
+Requirements:
+- macOS 15 (Sequoia) or later
+- Apple Container installed (`brew install container` or from [github.com/apple/container](https://github.com/apple/container))
 
-These work for both local and remote gateways (SSH is handled automatically). Examples:
+Getting started:
 
 ```bash
-kubectl get pods -A
-kubectl logs -n openshell statefulset/openshell
-k9s
-k9s -n openshell
+container system start       # Start Apple Container runtime
+openshell gateway start      # Auto-detects Apple Container, starts native gateway
+openshell sandbox create -- claude  # Creates an Apple Container VM sandbox
+```
+
+The CLI auto-detects Apple Container and uses it as the default backend on macOS. No additional configuration is needed.
+
+### Cluster debugging helpers
+
+The `openshell doctor` subcommands provide gateway-aware diagnostics:
+
+```bash
+# List all sandbox containers
+openshell doctor exec -- container list --all
+
+# View gateway logs
+openshell doctor logs
 ```
 
 ## Main Tasks
@@ -184,7 +196,7 @@ These are the primary `mise` tasks for day-to-day development:
 | `python/`       | Python SDK and bindings                       |
 | `proto/`        | Protocol buffer definitions                   |
 | `tasks/`        | `mise` task definitions and build scripts     |
-| `deploy/`       | Dockerfiles, Helm chart, Kubernetes manifests |
+| `deploy/`       | Dockerfiles, deployment configuration |
 | `architecture/` | Architecture docs and plans                   |
 | `rfc/`          | Request for Comments proposals                |
 | `docs/`         | User-facing documentation (Sphinx/MyST)       |

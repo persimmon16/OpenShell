@@ -472,10 +472,10 @@ If you change sandbox or server code that affects the backend, redeploy the gate
 mise run cluster:deploy all
 ```
 
-To pick up new sandbox images after changing sandbox code, delete the pod manually so it gets recreated:
+To pick up new sandbox images after changing sandbox code, delete the sandbox so it gets recreated:
 
 ```bash
-kubectl delete pod <pod-name> -n <namespace>
+openshell sandbox delete <sandbox-name>
 ```
 
 ### Adding a new gRPC call

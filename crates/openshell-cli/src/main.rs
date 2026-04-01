@@ -807,10 +807,6 @@ enum GatewayCommands {
         /// NVIDIA k8s-device-plugin so Kubernetes workloads can request
         /// `nvidia.com/gpu` resources. Requires NVIDIA drivers and the
         /// NVIDIA Container Toolkit on the host.
-        ///
-        /// When enabled, OpenShell auto-selects CDI when the Docker daemon has
-        /// CDI enabled and falls back to Docker's NVIDIA GPU request path
-        /// (`--gpus all`) otherwise.
         #[arg(long)]
         gpu: bool,
     },
@@ -1116,10 +1112,8 @@ enum SandboxCommands {
         /// Request GPU resources for the sandbox.
         ///
         /// When no gateway is running, auto-bootstrap starts a GPU-enabled
-        /// gateway using the same automatic injection selection as
-        /// `openshell gateway start --gpu`. GPU intent is also inferred
-        /// automatically for known GPU-designated image names such as
-        /// `nvidia-gpu`.
+        /// gateway. GPU intent is also inferred automatically for known
+        /// GPU-designated image names such as `nvidia-gpu`.
         #[arg(long)]
         gpu: bool,
 
@@ -1576,11 +1570,6 @@ async fn main() -> Result<()> {
                 registry_token,
                 gpu,
             } => {
-                let gpu = if gpu {
-                    vec!["auto".to_string()]
-                } else {
-                    vec![]
-                };
                 run::gateway_admin_deploy(
                     &name,
                     remote.as_deref(),
@@ -2566,6 +2555,7 @@ mod tests {
             auth_mode: Some("cloudflare_jwt".to_string()),
             edge_team_domain: None,
             edge_auth_url: None,
+            runtime_type: openshell_bootstrap::RuntimeType::AppleContainer,
         }
     }
 

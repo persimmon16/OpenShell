@@ -18,7 +18,7 @@ use openshell_server::{run_server, tracing_bus::TracingLogBus};
 #[command(version = openshell_core::VERSION)]
 #[command(about = "OpenShell gRPC/HTTP server", long_about = None)]
 struct Args {
-    /// Port to bind the server to (all interfaces).
+    /// Port to bind the server to (localhost only by default).
     #[arg(long, default_value_t = 8080, env = "OPENSHELL_SERVER_PORT")]
     port: u16,
 
@@ -42,20 +42,11 @@ struct Args {
     #[arg(long, env = "OPENSHELL_DB_URL", required = true)]
     db_url: String,
 
-    /// Kubernetes namespace for sandboxes.
-    #[arg(long, env = "OPENSHELL_SANDBOX_NAMESPACE", default_value = "default")]
-    sandbox_namespace: String,
-
     /// Default container image for sandboxes.
     #[arg(long, env = "OPENSHELL_SANDBOX_IMAGE")]
     sandbox_image: Option<String>,
 
-    /// Kubernetes imagePullPolicy for sandbox pods (Always, IfNotPresent, Never).
-    #[arg(long, env = "OPENSHELL_SANDBOX_IMAGE_PULL_POLICY")]
-    sandbox_image_pull_policy: Option<String>,
-
-    /// gRPC endpoint for sandboxes to callback to `OpenShell`.
-    /// This should be reachable from within the Kubernetes cluster.
+    /// gRPC endpoint for sandboxes to connect back to the gateway.
     #[arg(long, env = "OPENSHELL_GRPC_ENDPOINT")]
     grpc_endpoint: Option<String>,
 
@@ -87,16 +78,6 @@ struct Args {
     #[arg(long, env = "OPENSHELL_SSH_HANDSHAKE_SKEW_SECS", default_value_t = 300)]
     ssh_handshake_skew_secs: u64,
 
-    /// Kubernetes secret name containing client TLS materials for sandbox pods.
-    #[arg(long, env = "OPENSHELL_CLIENT_TLS_SECRET_NAME")]
-    client_tls_secret_name: Option<String>,
-
-    /// Host gateway IP for sandbox pod hostAliases.
-    /// When set, sandbox pods get hostAliases entries mapping
-    /// host.docker.internal and host.openshell.internal to this IP.
-    #[arg(long, env = "OPENSHELL_HOST_GATEWAY_IP")]
-    host_gateway_ip: Option<String>,
-
     /// Disable TLS entirely — listen on plaintext HTTP.
     /// Use this when the gateway sits behind a reverse proxy or tunnel
     /// (e.g. Cloudflare Tunnel) that terminates TLS at the edge.
@@ -108,6 +89,27 @@ struct Args {
     /// certificate. Ignored when --disable-tls is set.
     #[arg(long, env = "OPENSHELL_DISABLE_GATEWAY_AUTH")]
     disable_gateway_auth: bool,
+
+    /// Sandbox backend (always apple-container on macOS).
+    #[arg(long, env = "OPENSHELL_SANDBOX_BACKEND", default_value = "apple-container")]
+    sandbox_backend: String,
+
+    /// Container bridge daemon endpoint (required for apple-container backend).
+    /// The gateway connects to this endpoint over mutual TLS.
+    #[arg(long, env = "OPENSHELL_BRIDGE_ENDPOINT")]
+    bridge_endpoint: Option<String>,
+
+    /// Path to CA certificate for verifying the bridge daemon's TLS certificate.
+    #[arg(long, env = "OPENSHELL_BRIDGE_TLS_CA")]
+    bridge_tls_ca: Option<PathBuf>,
+
+    /// Path to client certificate for authenticating to the bridge daemon.
+    #[arg(long, env = "OPENSHELL_BRIDGE_TLS_CERT")]
+    bridge_tls_cert: Option<PathBuf>,
+
+    /// Path to client private key for authenticating to the bridge daemon.
+    #[arg(long, env = "OPENSHELL_BRIDGE_TLS_KEY")]
+    bridge_tls_key: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -118,6 +120,15 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    // Require explicit acknowledgment for insecure mode.
+    if args.disable_tls && std::env::var("OPENSHELL_ALLOW_INSECURE").as_deref() != Ok("1") {
+        eprintln!(
+            "ERROR: --disable-tls removes all transport security.\n\
+             Set OPENSHELL_ALLOW_INSECURE=1 to confirm."
+        );
+        std::process::exit(1);
+    }
+
     // Initialize tracing
     let tracing_log_bus = TracingLogBus::new();
     tracing_log_bus.install_subscriber(
@@ -125,7 +136,7 @@ async fn main() -> Result<()> {
     );
 
     // Build configuration
-    let bind = SocketAddr::from(([0, 0, 0, 0], args.port));
+    let bind = SocketAddr::from(([127, 0, 0, 1], args.port));
 
     let tls = if args.disable_tls {
         None
@@ -157,7 +168,6 @@ async fn main() -> Result<()> {
 
     config = config
         .with_database_url(args.db_url)
-        .with_sandbox_namespace(args.sandbox_namespace)
         .with_ssh_gateway_host(args.ssh_gateway_host)
         .with_ssh_gateway_port(args.ssh_gateway_port)
         .with_ssh_connect_path(args.ssh_connect_path)
@@ -168,10 +178,6 @@ async fn main() -> Result<()> {
         config = config.with_sandbox_image(image);
     }
 
-    if let Some(policy) = args.sandbox_image_pull_policy {
-        config = config.with_sandbox_image_pull_policy(policy);
-    }
-
     if let Some(endpoint) = args.grpc_endpoint {
         config = config.with_grpc_endpoint(endpoint);
     }
@@ -180,15 +186,27 @@ async fn main() -> Result<()> {
         config = config.with_ssh_handshake_secret(secret);
     }
 
-    if let Some(name) = args.client_tls_secret_name {
-        config = config.with_client_tls_secret_name(name);
+    config = config.with_sandbox_backend(&args.sandbox_backend);
+
+    if let Some(endpoint) = args.bridge_endpoint {
+        config = config.with_bridge_endpoint(endpoint);
     }
 
-    if let Some(ip) = args.host_gateway_ip {
-        config = config.with_host_gateway_ip(ip);
+    // Build bridge TLS config when all three paths are provided.
+    if let (Some(ca), Some(cert), Some(key)) = (
+        args.bridge_tls_ca,
+        args.bridge_tls_cert,
+        args.bridge_tls_key,
+    ) {
+        config = config.with_bridge_tls(openshell_core::BridgeTlsConfig {
+            ca_path: ca,
+            cert_path: cert,
+            key_path: key,
+        });
     }
 
     if args.disable_tls {
+        eprintln!("WARNING: TLS disabled — all traffic is plaintext");
         info!("TLS disabled — listening on plaintext HTTP");
     } else if args.disable_gateway_auth {
         info!("Gateway auth disabled — accepting connections without client certificates");

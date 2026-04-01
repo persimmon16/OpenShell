@@ -24,23 +24,11 @@ pub struct Config {
     /// Database URL for persistence.
     pub database_url: String,
 
-    /// Kubernetes namespace for sandboxes.
-    #[serde(default = "default_sandbox_namespace")]
-    pub sandbox_namespace: String,
-
     /// Default container image for sandboxes.
     #[serde(default)]
     pub sandbox_image: String,
 
-    /// Kubernetes `imagePullPolicy` for sandbox pods (e.g. `Always`,
-    /// `IfNotPresent`, `Never`).  Defaults to empty, which lets Kubernetes
-    /// apply its own default (`:latest` → `Always`, anything else →
-    /// `IfNotPresent`).
-    #[serde(default)]
-    pub sandbox_image_pull_policy: String,
-
     /// gRPC endpoint for sandboxes to connect back to OpenShell.
-    /// Used by sandbox pods to fetch their policy at startup.
     #[serde(default)]
     pub grpc_endpoint: String,
 
@@ -72,18 +60,24 @@ pub struct Config {
     #[serde(default = "default_ssh_session_ttl_secs")]
     pub ssh_session_ttl_secs: u64,
 
-    /// Kubernetes secret name containing client TLS materials for sandbox pods.
-    /// When set, sandbox pods get this secret mounted so they can connect to
-    /// the server over mTLS.
-    #[serde(default)]
-    pub client_tls_secret_name: String,
+    /// Sandbox backend (e.g. `"apple-container"`).
+    #[serde(default = "default_sandbox_backend")]
+    pub sandbox_backend: String,
 
-    /// Host gateway IP for sandbox pod hostAliases.
-    /// When set, sandbox pods get hostAliases entries mapping
-    /// `host.docker.internal` and `host.openshell.internal` to this IP,
-    /// allowing them to reach services running on the Docker host.
+    /// Endpoint of the container bridge daemon (e.g., `https://host.containers.internal:50052`).
+    ///
+    /// Required when `sandbox_backend` is `"apple-container"`. The gateway
+    /// connects to this endpoint over mutual TLS.
     #[serde(default)]
-    pub host_gateway_ip: String,
+    pub bridge_endpoint: String,
+
+    /// TLS configuration for the container bridge connection.
+    ///
+    /// When set, the gateway authenticates to the bridge daemon using mTLS.
+    /// The gateway presents `bridge_tls.cert_path` / `bridge_tls.key_path`
+    /// as the client certificate and verifies the bridge's server certificate
+    /// against `bridge_tls.ca_path`.
+    pub bridge_tls: Option<BridgeTlsConfig>,
 }
 
 /// TLS configuration.
@@ -112,6 +106,23 @@ pub struct TlsConfig {
     pub allow_unauthenticated: bool,
 }
 
+/// TLS configuration for the gateway-to-bridge-daemon connection.
+///
+/// Both sides authenticate: the bridge daemon verifies the gateway's client
+/// certificate, and the gateway verifies the bridge daemon's server certificate.
+/// All certificates must be signed by the same CA.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BridgeTlsConfig {
+    /// Path to the CA certificate for verifying the bridge daemon's server cert.
+    pub ca_path: PathBuf,
+
+    /// Path to the client certificate the gateway presents to the bridge daemon.
+    pub cert_path: PathBuf,
+
+    /// Path to the private key for the client certificate.
+    pub key_path: PathBuf,
+}
+
 impl Config {
     /// Create a new config with optional TLS.
     pub fn new(tls: Option<TlsConfig>) -> Self {
@@ -120,9 +131,7 @@ impl Config {
             log_level: default_log_level(),
             tls,
             database_url: String::new(),
-            sandbox_namespace: default_sandbox_namespace(),
             sandbox_image: String::new(),
-            sandbox_image_pull_policy: String::new(),
             grpc_endpoint: String::new(),
             ssh_gateway_host: default_ssh_gateway_host(),
             ssh_gateway_port: default_ssh_gateway_port(),
@@ -131,8 +140,9 @@ impl Config {
             ssh_handshake_secret: String::new(),
             ssh_handshake_skew_secs: default_ssh_handshake_skew_secs(),
             ssh_session_ttl_secs: default_ssh_session_ttl_secs(),
-            client_tls_secret_name: String::new(),
-            host_gateway_ip: String::new(),
+            sandbox_backend: default_sandbox_backend(),
+            bridge_endpoint: String::new(),
+            bridge_tls: None,
         }
     }
 
@@ -157,24 +167,10 @@ impl Config {
         self
     }
 
-    /// Create a new configuration with a sandbox namespace.
-    #[must_use]
-    pub fn with_sandbox_namespace(mut self, namespace: impl Into<String>) -> Self {
-        self.sandbox_namespace = namespace.into();
-        self
-    }
-
     /// Create a new configuration with a default sandbox image.
     #[must_use]
     pub fn with_sandbox_image(mut self, image: impl Into<String>) -> Self {
         self.sandbox_image = image.into();
-        self
-    }
-
-    /// Create a new configuration with a sandbox image pull policy.
-    #[must_use]
-    pub fn with_sandbox_image_pull_policy(mut self, policy: impl Into<String>) -> Self {
-        self.sandbox_image_pull_policy = policy.into();
         self
     }
 
@@ -234,31 +230,34 @@ impl Config {
         self
     }
 
-    /// Set the Kubernetes secret name for sandbox client TLS materials.
+    /// Set the sandbox backend.
     #[must_use]
-    pub fn with_client_tls_secret_name(mut self, name: impl Into<String>) -> Self {
-        self.client_tls_secret_name = name.into();
+    pub fn with_sandbox_backend(mut self, backend: impl Into<String>) -> Self {
+        self.sandbox_backend = backend.into();
         self
     }
 
-    /// Set the host gateway IP for sandbox pod hostAliases.
+    /// Set the container bridge daemon endpoint.
     #[must_use]
-    pub fn with_host_gateway_ip(mut self, ip: impl Into<String>) -> Self {
-        self.host_gateway_ip = ip.into();
+    pub fn with_bridge_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.bridge_endpoint = endpoint.into();
+        self
+    }
+
+    /// Set the mTLS configuration for the bridge daemon connection.
+    #[must_use]
+    pub fn with_bridge_tls(mut self, tls: BridgeTlsConfig) -> Self {
+        self.bridge_tls = Some(tls);
         self
     }
 }
 
 fn default_bind_address() -> SocketAddr {
-    "0.0.0.0:8080".parse().expect("valid default address")
+    "127.0.0.1:8080".parse().expect("valid default address")
 }
 
 fn default_log_level() -> String {
     "info".to_string()
-}
-
-fn default_sandbox_namespace() -> String {
-    "default".to_string()
 }
 
 fn default_ssh_gateway_host() -> String {
@@ -283,4 +282,8 @@ const fn default_ssh_handshake_skew_secs() -> u64 {
 
 const fn default_ssh_session_ttl_secs() -> u64 {
     86400 // 24 hours
+}
+
+fn default_sandbox_backend() -> String {
+    "apple-container".to_string()
 }
