@@ -908,16 +908,14 @@ impl OpenShell for OpenShellService {
             .metadata()
             .get("x-sandbox-id")
             .and_then(|v| v.to_str().ok())
-            .map(String::from);
+            .ok_or_else(|| Status::permission_denied("missing x-sandbox-id header"))?;
 
         let sandbox_id = request.into_inner().sandbox_id;
 
-        if let Some(ref caller) = caller_sandbox_id {
-            if caller != &sandbox_id {
-                return Err(Status::permission_denied(
-                    "cannot access another sandbox's provider environment",
-                ));
-            }
+        if caller_sandbox_id != sandbox_id {
+            return Err(Status::permission_denied(
+                "cannot access another sandbox's provider environment",
+            ));
         }
 
         let sandbox = self
