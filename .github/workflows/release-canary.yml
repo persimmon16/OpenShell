@@ -50,6 +50,8 @@ jobs:
           curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh
 
       - name: Verify CLI installation
+        env:
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
         run: |
           set -euo pipefail
           command -v openshell
@@ -57,7 +59,7 @@ jobs:
           echo "Installed: $ACTUAL"
           # This job only runs after Release Tag, so the triggering tag
           # should match the latest release the default installer resolves to.
-          TAG="${{ github.event.workflow_run.head_branch }}"
+          TAG="$HEAD_BRANCH"
           if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             EXPECTED="${TAG#v}"
             if [[ "$ACTUAL" != *"$EXPECTED"* ]]; then
@@ -108,21 +110,24 @@ jobs:
 
       - name: Determine release tag
         id: release
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
           else
-            WORKFLOW_NAME="${{ github.event.workflow_run.name }}"
             if [ "$WORKFLOW_NAME" = "Release Dev" ]; then
               echo "tag=dev" >> "$GITHUB_OUTPUT"
             elif [ "$WORKFLOW_NAME" = "Release Tag" ]; then
-              TAG="${{ github.event.workflow_run.head_branch }}"
-              if [ -z "$TAG" ]; then
+              if [ -z "$HEAD_BRANCH" ]; then
                 echo "::error::Could not determine release tag from workflow_run"
                 exit 1
               fi
-              echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+              echo "tag=${HEAD_BRANCH}" >> "$GITHUB_OUTPUT"
             else
               echo "::error::Unexpected triggering workflow: ${WORKFLOW_NAME}"
               exit 1
@@ -130,17 +135,21 @@ jobs:
           fi
 
       - name: Install CLI from published install script
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
-          curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | OPENSHELL_VERSION=${{ steps.release.outputs.tag }} OPENSHELL_INSTALL_DIR=/usr/local/bin sh
+          curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | OPENSHELL_VERSION="$RELEASE_TAG" OPENSHELL_INSTALL_DIR=/usr/local/bin sh
 
       - name: Verify CLI installation
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
           command -v openshell
           ACTUAL="$(openshell --version)"
           echo "Installed: $ACTUAL"
-          TAG="${{ steps.release.outputs.tag }}"
+          TAG="$RELEASE_TAG"
           # For tagged releases (v1.2.3), verify the semver appears in the version string
           if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             EXPECTED="${TAG#v}"
