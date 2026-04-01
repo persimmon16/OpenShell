@@ -93,25 +93,36 @@ impl AppleContainerRuntime {
         Ok(())
     }
 
-    /// Check if a gateway process is running by reading the PID file.
+    /// Check if a gateway process is running by probing the PID file lock.
     pub async fn check_existing(&self, name: &str) -> Result<Option<ExistingGateway>> {
         let pid_path = self.pid_path(name);
         if !pid_path.exists() {
             return Ok(None);
         }
 
-        let pid_str = std::fs::read_to_string(&pid_path).unwrap_or_default();
-        let pid: i32 = match pid_str.trim().parse() {
-            Ok(p) => p,
-            Err(_) => return Ok(None),
+        // Use flock to determine if the gateway process is still holding the
+        // PID file lock. This avoids the TOCTOU race between reading the PID
+        // and checking with kill(pid, 0).
+        let running = match std::fs::File::open(&pid_path) {
+            Ok(file) => {
+                let fd = std::os::unix::io::AsRawFd::as_raw_fd(&file);
+                // LOCK_EX | LOCK_NB: try non-blocking exclusive lock.
+                // If we get it, no process holds it → not running.
+                let got_lock = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0;
+                if got_lock {
+                    // Release the lock we just acquired.
+                    unsafe { libc::flock(fd, libc::LOCK_UN) };
+                    false
+                } else {
+                    true
+                }
+            }
+            Err(_) => false,
         };
-
-        // Check if process is alive.
-        let alive = unsafe { libc::kill(pid, 0) } == 0;
 
         Ok(Some(ExistingGateway {
             container_exists: true,
-            container_running: alive,
+            container_running: running,
             storage_exists: self.data_dir(name).exists(),
             container_image: Some("native".to_string()),
         }))
@@ -186,6 +197,14 @@ impl AppleContainerRuntime {
         std::fs::write(&pid_path, child.id().to_string())
             .into_diagnostic()
             .wrap_err("failed to write PID file")?;
+
+        // Hold an exclusive lock on the PID file for the process lifetime.
+        // check_existing() uses flock to determine if the gateway is running.
+        let pid_file = std::fs::File::open(&pid_path).into_diagnostic()?;
+        let fd = std::os::unix::io::AsRawFd::as_raw_fd(&pid_file);
+        unsafe { libc::flock(fd, libc::LOCK_EX) };
+        // pid_file is intentionally leaked to hold the lock until process exit.
+        std::mem::forget(pid_file);
 
         Ok(())
     }

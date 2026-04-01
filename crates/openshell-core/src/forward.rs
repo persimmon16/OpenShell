@@ -292,6 +292,12 @@ impl ForwardSpec {
                 if port == 0 {
                     return Err(miette::miette!("port must be between 1 and 65535"));
                 }
+                if addr == "0.0.0.0" || addr == "::" {
+                    eprintln!(
+                        "warning: port forwarding binds to all interfaces ({}); use 127.0.0.1 to restrict to localhost",
+                        addr
+                    );
+                }
                 return Ok(Self {
                     bind_addr: addr.to_string(),
                     port,
