@@ -23,9 +23,22 @@ jobs:
   macos-e2e:
     runs-on: macos-15
     timeout-minutes: 30
+    env:
+      CONTAINER_VERSION: "0.11.0"
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Swift 6.2
+        run: |
+          curl -fsSL -o swiftly.pkg https://download.swift.org/swiftly/darwin/swiftly.pkg
+          installer -pkg swiftly.pkg -target CurrentUserHomeDirectory
+          rm swiftly.pkg
+          ~/.swiftly/bin/swiftly init --quiet-shell-followup
+          . "${SWIFTLY_HOME_DIR:-$HOME/.swiftly}/env.sh"
+          swiftly install 6.2
+          echo "${SWIFTLY_HOME_DIR:-$HOME/.swiftly}/bin" >> "$GITHUB_PATH"
+          swift --version
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -34,8 +47,6 @@ jobs:
         uses: jdx/mise-action@v2
 
       - name: Install Apple Container
-        env:
-          CONTAINER_VERSION: "0.11.0"
         run: |
           curl -fsSL -o container-installer.pkg \
             "https://github.com/apple/container/releases/download/${CONTAINER_VERSION}/container-${CONTAINER_VERSION}-installer-signed.pkg"
@@ -47,6 +58,9 @@ jobs:
 
       - name: Build CLI
         run: cargo build --release -p openshell-cli
+
+      - name: Clone Apple Container (Swift package dependency)
+        run: git clone --depth 1 --branch "$CONTAINER_VERSION" https://github.com/apple/container.git container
 
       - name: Build Swift bridge
         working-directory: container-bridge
