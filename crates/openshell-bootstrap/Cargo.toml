@@ -15,6 +15,7 @@ libc = "0.2"
 miette = { workspace = true }
 rcgen = { workspace = true }
 serde = { workspace = true }
+time = "0.3"
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
