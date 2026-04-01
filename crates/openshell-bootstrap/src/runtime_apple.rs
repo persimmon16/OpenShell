@@ -130,7 +130,7 @@ impl AppleContainerRuntime {
         let server_bin = find_server_binary()?;
 
         // Generate SSH handshake secret.
-        let secret = generate_secret();
+        let secret = generate_secret()?;
 
         // Build server arguments.
         let db_url = format!("sqlite://{}/openshell.db", data_dir.display());
@@ -489,11 +489,11 @@ fn find_server_binary() -> Result<PathBuf> {
 }
 
 /// Generate a random hex secret for SSH handshake HMAC.
-fn generate_secret() -> String {
+fn generate_secret() -> Result<String> {
     use std::io::Read;
     let mut bytes = [0u8; 32];
     std::fs::File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut bytes))
-        .unwrap_or_default();
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+        .map_err(|e| miette::miette!("cannot read /dev/urandom for secret generation: {e}"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
