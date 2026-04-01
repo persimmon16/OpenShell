@@ -22,7 +22,7 @@ struct ContainerBridgeDaemon: AsyncParsableCommand {
     var port: Int = 50052
 
     @Option(name: .long, help: "Host to bind to")
-    var host: String = "0.0.0.0"
+    var host: String = "127.0.0.1"
 
     func run() async throws {
         var logger = Logger(label: "com.openshell.container-bridge")
