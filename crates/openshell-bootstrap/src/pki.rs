@@ -20,17 +20,13 @@ pub struct PkiBundle {
 /// Default SANs always included on the server certificate.
 const DEFAULT_SERVER_SANS: &[&str] = &[
     "openshell",
-    "openshell.openshell.svc",
-    "openshell.openshell.svc.cluster.local",
     "localhost",
-    "host.docker.internal",
+    "host.containers.internal",
     "127.0.0.1",
 ];
 
-/// SANs for the container bridge daemon certificate (macOS host).
-///
-/// `host.containers.internal` is the hostname Apple Container VMs use to reach
-/// the host, analogous to Docker's `host.docker.internal`.
+/// SANs for the server certificate. `host.containers.internal` is the hostname
+/// Apple Container VMs use to reach the macOS host.
 
 /// Generate a complete PKI bundle: CA, server cert, and client cert.
 ///
@@ -48,7 +44,7 @@ pub fn generate_pki(extra_sans: &[String]) -> Result<PkiBundle> {
     let mut ca_params = CertificateParams::new(Vec::<String>::new())
         .into_diagnostic()
         .wrap_err("failed to create CA params")?;
-    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
     ca_params
         .distinguished_name
         .push(DnType::OrganizationName, "openshell");
