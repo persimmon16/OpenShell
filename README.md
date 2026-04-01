@@ -1,22 +1,49 @@
-# OpenShell
+# OpenShell (persimmon16 fork)
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue)](https://github.com/NVIDIA/OpenShell/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue)](https://github.com/persimmon16/OpenShell/blob/main/LICENSE)
+[![Upstream](https://img.shields.io/badge/upstream-NVIDIA%2FOpenShell-76b900?logo=nvidia)](https://github.com/NVIDIA/OpenShell)
 [![PyPI](https://img.shields.io/badge/PyPI-openshell-orange?logo=pypi)](https://pypi.org/project/openshell/)
 [![Security Policy](https://img.shields.io/badge/Security-Report%20a%20Vulnerability-red)](SECURITY.md)
 [![Documentation](https://img.shields.io/badge/docs-latest-brightgreen)](https://docs.nvidia.com/openshell/latest/index.html)
-[![Project Status](https://img.shields.io/badge/status-alpha-orange)](https://docs.nvidia.com/openshell/latest/about/release-notes.html)
+
+This is an active fork of [NVIDIA/OpenShell](https://github.com/NVIDIA/OpenShell) with two objectives:
+
+1. **Replace Docker with [Apple Container](https://github.com/apple/container)** as the container runtime on macOS, eliminating the Docker dependency entirely.
+2. **Harden security** across the CI pipeline, gateway, PKI, and sandbox stack.
 
 OpenShell is the safe, private runtime for autonomous AI agents. It provides sandboxed execution environments that protect your data, credentials, and infrastructure — governed by declarative YAML policies that prevent unauthorized file access, data exfiltration, and uncontrolled network activity.
 
-OpenShell is built agent-first. The project ships with agent skills for everything from cluster debugging to policy generation, and we expect contributors to use them.
+> **Fork status: active development.** The Apple Container migration is in progress. Security hardening has landed across 8 merged PRs. This fork tracks upstream and periodically syncs.
 
-> **Alpha software — single-player mode.** OpenShell is proof-of-life: one developer, one environment, one gateway. We are building toward multi-tenant enterprise deployments, but the starting point is getting your own environment up and running. Expect rough edges. Bring your agent.
+## Fork Development Status
+
+### Merged
+
+| Area | Branch | Summary |
+|------|--------|---------|
+| Security | `security/secure-defaults` | Localhost bind, enforce mode, Apple Container backend |
+| Security | `security/ci-hardening` | Fix shell injection in GitHub Actions workflows |
+| Security | `security/pki-hardening` | Constrain CA, fail-hard secrets, 365-day cert TTL |
+| Security | `security/ssh-host-key` | SSH host key verification when gateway provides fingerprint |
+| Security | `security/gateway-auth` | Insecure-mode guard, cross-sandbox credential theft fix |
+| Security | `security/misc-hardening` | PID locking, forward-spec warning, non-root container |
+| Security | `security/dead-code-removal` | Remove Kubernetes/Docker dead code from config and server |
+| Security | `security/fix-ssh-host-key-verification` | Hostname format, tempfile dep, TempDir leak fixes |
+| CI | `ci/trigger-macos-e2e` | macOS e2e validation with Apple Container install |
+| CI | `fix/release-auto-tag-signing` | Sign auto-tags via GitHub API, handle missing seed tag |
+
+### In Progress
+
+| Area | Branch | Summary |
+|------|--------|---------|
+| Runtime | `feat/apple-container` | Core Apple Container integration (21 commits ahead) |
+| CI | `fix/ci-swift-bridge-dependency` | Clone Apple Container for Swift bridge build |
 
 ## Quickstart
 
 ### Prerequisites
 
-- **Docker** — Docker Desktop (or a Docker daemon) must be running.
+- **Apple Container** — [github.com/apple/container](https://github.com/apple/container). Requires Apple silicon, macOS 15+, and Xcode 26. See the Apple Container [build instructions](https://github.com/apple/container/blob/main/BUILDING.md) to install from source.
 
 ### Install
 
@@ -32,7 +59,7 @@ curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | 
 uv tool install -U openshell
 ```
 
-Both methods install the latest stable release by default. To install a specific version, set `OPENSHELL_VERSION` (binary) or pin the version with `uv tool install openshell==<version>`. A [`dev` release](https://github.com/NVIDIA/OpenShell/releases/tag/dev) is also available that tracks the latest commit on `main`.
+Both methods install the latest stable release from upstream by default. To install a specific version, set `OPENSHELL_VERSION` (binary) or pin the version with `uv tool install openshell==<version>`.
 
 ### Create a sandbox
 
@@ -99,7 +126,7 @@ OpenShell isolates each sandbox in its own container with policy-enforced egress
 | **Policy Engine**  | Enforces filesystem, network, and process constraints from application layer down to kernel. |
 | **Privacy Router** | Privacy-aware LLM routing that keeps sensitive context on sandbox compute.                   |
 
-Under the hood, all these components run as a [K3s](https://k3s.io/) Kubernetes cluster inside a single Docker container — no separate K8s install required. The `openshell gateway` commands take care of provisioning the container and cluster.
+Under the hood, all these components run as a [K3s](https://k3s.io/) Kubernetes cluster inside a container — no separate K8s install required. On this fork, the container runtime is [Apple Container](https://github.com/apple/container) on macOS (replacing the upstream Docker dependency). The `openshell gateway` commands take care of provisioning the container and cluster.
 
 ## Protection Layers
 
@@ -128,9 +155,9 @@ OpenShell can pass host GPUs into sandboxes for local inference, fine-tuning, or
 openshell sandbox create --gpu --from [gpu-enabled-sandbox] -- claude
 ```
 
-The CLI auto-bootstraps a GPU-enabled gateway on first use, auto-selecting CDI when available and otherwise falling back to Docker's NVIDIA GPU request path (`--gpus all`). GPU intent is also inferred automatically for community images with `gpu` in the name.
+The CLI auto-bootstraps a GPU-enabled gateway on first use, auto-selecting CDI when available. GPU intent is also inferred automatically for community images with `gpu` in the name.
 
-**Requirements:** NVIDIA drivers and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) must be installed on the host. The sandbox image itself must include the appropriate GPU drivers and libraries for your workload — the default `base` image does not. See the [BYOC example](https://github.com/NVIDIA/OpenShell/tree/main/examples/bring-your-own-container) for building a custom sandbox image with GPU support.
+**Requirements:** NVIDIA drivers and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) must be installed on the host. The sandbox image must include the appropriate GPU drivers and libraries for your workload — the default `base` image does not. See the [BYOC example](https://github.com/NVIDIA/OpenShell/tree/main/examples/bring-your-own-container) for building a custom sandbox image with GPU support.
 
 ## Supported Agents
 
@@ -187,10 +214,10 @@ See the [community sandboxes](https://github.com/NVIDIA/OpenShell/blob/main/docs
 
 ## Explore with Your Agent
 
-Clone the repo and point your coding agent at it. The project includes agent skills that can answer questions, walk you through workflows, and diagnose problems — no issue filing required.
+Clone the fork and point your coding agent at it. The project includes agent skills that can answer questions, walk you through workflows, and diagnose problems — no issue filing required.
 
 ```bash
-git clone https://github.com/NVIDIA/OpenShell.git   # or git@github.com:NVIDIA/OpenShell.git
+git clone https://github.com/persimmon16/OpenShell.git
 cd OpenShell
 # Point your agent here — it will discover the skills in .agents/skills/ automatically
 ```
@@ -208,27 +235,42 @@ OpenShell is developed using the same agent-driven workflows it enables. The `.a
 
 All implementation work is human-gated — agents propose plans, humans approve, agents build. See [AGENTS.md](AGENTS.md) for the full workflow chain documentation.
 
+## Architecture
+
+| Component | Crate | Purpose |
+|-----------|-------|---------|
+| CLI | `crates/openshell-cli/` | User-facing command-line interface |
+| Gateway | `crates/openshell-server/` | Control-plane API, sandbox lifecycle, auth boundary |
+| Sandbox | `crates/openshell-sandbox/` | Container supervision, policy-enforced egress routing |
+| Policy Engine | `crates/openshell-policy/` | Filesystem, network, process, and inference constraints |
+| Privacy Router | `crates/openshell-router/` | Privacy-aware LLM routing |
+| Bootstrap | `crates/openshell-bootstrap/` | Cluster setup, image loading, mTLS PKI |
+| Core | `crates/openshell-core/` | Shared types, configuration, error handling |
+| Providers | `crates/openshell-providers/` | Credential provider backends |
+| TUI | `crates/openshell-tui/` | Ratatui-based terminal dashboard |
+| Python SDK | `python/openshell/` | Python bindings and CLI packaging |
+
+See [architecture/](architecture/) for detailed design documents.
+
 ## Getting Help
 
-- **Questions and discussion:** [GitHub Discussions](https://github.com/NVIDIA/OpenShell/discussions)
-- **Bug reports:** [GitHub Issues](https://github.com/NVIDIA/OpenShell/issues) — use the bug report template
+- **Upstream discussions:** [GitHub Discussions](https://github.com/NVIDIA/OpenShell/discussions)
+- **Fork issues:** [persimmon16/OpenShell Issues](https://github.com/persimmon16/OpenShell/issues)
+- **Upstream bugs:** [NVIDIA/OpenShell Issues](https://github.com/NVIDIA/OpenShell/issues) — use the bug report template
 - **Security vulnerabilities:** See [SECURITY.md](SECURITY.md) — do not use GitHub Issues
 - **Agent-assisted help:** Clone the repo and use the agent skills in `.agents/skills/` for self-service diagnostics
 
 ## Learn More
 
-- [Full Documentation](https://docs.nvidia.com/openshell/latest/index.html) — overview, architecture, tutorials, and reference
-- [Quickstart](https://github.com/NVIDIA/OpenShell/blob/main/docs/get-started/quickstart.md) — detailed install and first sandbox walkthrough
-- [GitHub Sandbox Tutorial](https://github.com/NVIDIA/OpenShell/blob/main/docs/tutorials/github-sandbox.md) — end-to-end scoped GitHub repo access
-- [Architecture](https://github.com/NVIDIA/OpenShell/tree/main/architecture) — detailed architecture docs and design decisions
-- [Support Matrix](https://github.com/NVIDIA/OpenShell/blob/main/docs/reference/support-matrix.md) — platforms, versions, and kernel requirements
-- [Brev Launchable](https://brev.nvidia.com/launchable/deploy/now?launchableID=env-3Ap3tL55zq4a8kew1AuW0FpSLsg) — try OpenShell on cloud compute without local setup
+- [Full Documentation](https://docs.nvidia.com/openshell/latest/index.html) — upstream overview, architecture, tutorials, and reference
+- [Architecture](architecture/) — detailed architecture docs and design decisions
+- [Apple Container](https://github.com/apple/container) — the macOS container runtime this fork targets
 - [Agent Instructions](AGENTS.md) — system prompt and workflow documentation for agent contributors
 
 ## Contributing
 
-OpenShell is built agent-first — your agent is your first collaborator. Before opening issues or submitting code, point your agent at the repo and let it use the skills in `.agents/skills/` to investigate, diagnose, and prototype. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full agent skills table, contribution workflow, and development setup.
+This fork is built agent-first — your agent is your first collaborator. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full agent skills table, contribution workflow, and development setup. For upstream contributions, open PRs against [NVIDIA/OpenShell](https://github.com/NVIDIA/OpenShell).
 
 ## License
 
-This project is licensed under the [Apache License 2.0](https://github.com/NVIDIA/OpenShell/blob/main/LICENSE).
+This project is licensed under the [Apache License 2.0](LICENSE).
