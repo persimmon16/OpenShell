@@ -48,6 +48,9 @@ jobs:
       - name: Build CLI
         run: cargo build --release -p openshell-cli
 
+      - name: Clone Apple Container (Swift package dependency)
+        run: git clone --depth 1 --branch 0.11.0 https://github.com/apple/container.git container
+
       - name: Build Swift bridge
         working-directory: container-bridge
         run: swift build -c release
