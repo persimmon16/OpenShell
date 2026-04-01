@@ -8,6 +8,16 @@ e2e/rust/target/
 debug/
 release/
 
+# =============================================================================
+# Swift (container-bridge)
+# =============================================================================
+container-bridge/.build/
+
+# =============================================================================
+# Apple Container source (cloned for CI builds)
+# =============================================================================
+/container/
+
 # Cargo lock for libraries (keep for binaries/workspace)
 # Cargo.lock  # We keep this since this is a binary/workspace project
 
