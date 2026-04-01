@@ -901,7 +901,24 @@ impl OpenShell for OpenShellService {
         &self,
         request: Request<GetSandboxProviderEnvironmentRequest>,
     ) -> Result<Response<GetSandboxProviderEnvironmentResponse>, Status> {
+        // Verify caller identity: the requesting sandbox must only access its
+        // own provider environment. The x-sandbox-id metadata header is set by
+        // the sandbox supervisor when it calls back to the gateway.
+        let caller_sandbox_id = request
+            .metadata()
+            .get("x-sandbox-id")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+
         let sandbox_id = request.into_inner().sandbox_id;
+
+        if let Some(ref caller) = caller_sandbox_id {
+            if caller != &sandbox_id {
+                return Err(Status::permission_denied(
+                    "cannot access another sandbox's provider environment",
+                ));
+            }
+        }
 
         let sandbox = self
             .state
