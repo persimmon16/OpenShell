@@ -96,19 +96,19 @@ sequenceDiagram
     participant gRPC as Gateway (gRPC)
     participant Proxy as CLI (ssh-proxy)
     participant GW as Gateway (/connect/ssh)
-    participant K8s as Pod Resolver
+    participant VM as Apple Container VM
     participant SSHD as Sandbox SSH Daemon
 
     CLI->>gRPC: GetSandbox(name) -> sandbox.id
     CLI->>gRPC: CreateSshSession(sandbox_id)
     gRPC-->>CLI: token, gateway_host, gateway_port, scheme, connect_path
 
-    Note over CLI: Builds ProxyCommand string<br/>exec()s into ssh process
+    Note over CLI: Builds ProxyCommand string<br/>starts ssh process
 
     User->>Proxy: ssh spawns ProxyCommand subprocess
     Proxy->>GW: CONNECT /connect/ssh HTTP/1.1<br/>X-Sandbox-Id, X-Sandbox-Token
     GW->>GW: Validate token + sandbox phase
-    GW->>K8s: Resolve pod IP (or service DNS)
+    GW->>VM: Resolve container IP
     GW->>SSHD: TCP connect to port 2222
     GW->>SSHD: NSSH1 preface (token, ts, nonce, hmac)
     SSHD-->>GW: OK

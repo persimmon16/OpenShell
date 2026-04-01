@@ -56,7 +56,7 @@ For each relevant commit, determine which doc page(s) it affects. Use this mappi
 | `crates/openshell-inference/` | `docs/inference/configure.md` |
 | `python/` (SDK changes) | `docs/reference/` or `docs/get-started/quickstart.md` |
 | `proto/` (API changes) | `docs/reference/` |
-| `deploy/` (Dockerfile, Helm) | `docs/sandboxes/manage-gateways.md`, `docs/about/architecture.md` |
+| `deploy/` (Containerfile, config) | `docs/sandboxes/manage-gateways.md`, `docs/about/architecture.md` |
 | Community sandbox definitions | `docs/sandboxes/community-sandboxes.md` |
 
 If a commit does not map to any existing page but introduces a user-visible concept, flag it as needing a new page.

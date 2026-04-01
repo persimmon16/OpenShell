@@ -196,7 +196,7 @@ These are the primary `mise` tasks for day-to-day development:
 | `python/`       | Python SDK and bindings                       |
 | `proto/`        | Protocol buffer definitions                   |
 | `tasks/`        | `mise` task definitions and build scripts     |
-| `deploy/`       | Dockerfiles, deployment configuration |
+| `deploy/`       | Containerfiles, deployment configuration |
 | `architecture/` | Architecture docs and plans                   |
 | `rfc/`          | Request for Comments proposals                |
 | `docs/`         | User-facing documentation (Sphinx/MyST)       |

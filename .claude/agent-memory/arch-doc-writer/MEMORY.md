@@ -33,14 +33,11 @@
 - CLI cluster resolution: --cluster flag > OPENSHELL_CLUSTER env > active cluster file
 
 ## Bootstrap Crate Details
-- `docker.rs`: `ensure_container()` sets ~12 env vars (REGISTRY_*, IMAGE_*, PUSH_IMAGE_REFS, etc.)
-- `runtime.rs`: Polling params: health 180x2s, mTLS 90x2s
+- `container_runtime.rs`: RuntimeType enum, Apple Container runtime detection
+- `runtime_apple.rs`: Native macOS gateway process management, PID locking via flock
 - `metadata.rs`: Metadata at `gateways/{name}/metadata.json` (nested), mTLS at `gateways/{name}/mtls/` (nested)
-- `push.rs`: Uses `ctr` (not `k3s ctr`) with k3s containerd socket, `k8s.io` namespace
-- IMPORTANT: `ClusterHandle::destroy()` does NOT remove metadata; only CLI `cluster_admin_destroy()` in run.rs does
-- `ensure_image()`: Local-only refs (no `/`) get error with build instructions, not a Docker Hub pull attempt
-- Dockerfile.cluster: k3s v1.29.8-k3s1 base, manifests in `/opt/openshell/manifests/` (volume mount overwrites `/var/lib/`)
-- Healthcheck: checks k8s readyz, StatefulSet ready, Gateway Programmed, conditionally mTLS secret
+- IMPORTANT: No Docker, no K3s, no Kubernetes. Gateway runs as a native macOS process.
+- Container bridge: Swift daemon in `container-bridge/` translates gRPC to Apple Container API
 
 ## Server Crate Details
 - Two gRPC services: OpenShell (grpc.rs) and Inference (inference.rs), multiplexed via GrpcRouter by URI path
@@ -55,24 +52,15 @@
 - SSH handshake: "NSSH1" preface + HMAC-SHA256, used in both exec proxy (grpc.rs) and tunnel gateway (ssh_tunnel.rs)
 - Phase derivation: transient reasons (ReconcilerError, DependenciesNotReady) -> Provisioning; all others -> Error
 - Broadcast bus buffer sizes: SandboxWatchBus=128, TracingLogBus=1024, PlatformEventBus=1024
-- Sandbox CRD: `agents.x-k8s.io/v1alpha1/Sandbox`, labels: `openshell.ai/sandbox-id`, `openshell.ai/managed-by`
+- Sandbox backend: Apple Container VMs via container bridge gRPC
 - Proto files also include: `proto/inference.proto` (openshell.inference.v1)
 
 ## Container/Build Details
-- Four runtime images: sandbox (5 stages), gateway (2 stages), cluster (k3s base), pki-job (Alpine)
-- Two build-only images: python-wheels (Linux multi-arch), python-wheels-macos (osxcross cross-compile)
-- CI image: Dockerfile.ci (Ubuntu 24.04, pre-installs docker/buildx/aws/kubectl/helm/mise/uv/sccache/socat)
-- Cross-compilation: `deploy/docker/cross-build.sh` shared by sandbox + gateway Dockerfiles
-- Sandbox image has coding-agents stage: Claude CLI (native installer), OpenCode, Codex (npm)
-- Helm chart deploys a StatefulSet (NOT Deployment), PVC 1Gi at /var/openshell
-- Cluster image does NOT bundle image tarballs -- components pulled at runtime from distribution registry
-- PKI job generates CA + server cert + client cert for mTLS (RSA 2048, 10yr, Helm pre-install hook)
-- Build tasks in `tasks/*.toml`; scripts in `tasks/scripts/`
-- `cluster-deploy-fast.sh` supports both auto mode (git diff) and explicit targets (gateway/sandbox/chart/all)
-- `cluster-bootstrap.sh` ensures local Docker registry on port 5000, pushes all components, then deploys
-- Default values.yaml: repository is CloudFront-backed CDN, tag: "latest", pullPolicy: Always
-- Envoy Gateway version: v1.5.8 (set in mise.toml)
-- DNS solution in cluster-entrypoint.sh: iptables DNAT proxy (NOT host-gateway resolv.conf)
+- Gateway Containerfile: `deploy/container/Containerfile.gateway`
+- Container bridge: Swift package in `container-bridge/`, builds via `swift build -c release`
+- PKI: mTLS cert generation in bootstrap crate (RSA 2048)
+- Build tasks in `tasks/*.toml` (apple.toml for Apple Container tasks)
+- No Docker, no Helm, no K3s, no Kubernetes manifests
 
 ## Sandbox Connect Details
 - CLI SSH module: `crates/openshell-cli/src/ssh.rs` (sandbox_connect, sandbox_exec, sandbox_rsync, sandbox_ssh_proxy)

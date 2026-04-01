@@ -345,10 +345,10 @@ CLI: openshell sandbox create -- claude
         Gateway: create_sandbox()
           +-- Validates provider "claude" exists in store (fail fast)
           +-- Persists Sandbox with spec.providers = ["claude"]
-          +-- Creates K8s Sandbox CRD (no credentials in pod spec)
+          +-- Creates Apple Container VM (no credentials in container spec)
                 |
-                K8s: pod starts openshell-sandbox binary
-                  +-- OPENSHELL_SANDBOX_ID and OPENSHELL_ENDPOINT set in pod env
+                Apple Container: VM starts openshell-sandbox binary
+                  +-- OPENSHELL_SANDBOX_ID and OPENSHELL_ENDPOINT set in container env
                   |
                     Sandbox supervisor: run_sandbox()
                       +-- Fetches policy via gRPC

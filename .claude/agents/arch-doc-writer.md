@@ -19,7 +19,7 @@ This is the OpenShell project — a sandbox/isolation system built in Rust.
 The docs in `architecture/` are structured as subsystem[-component].md. Key sub-systems are:
 
 - build (build system)
-- cluster (the entire deployment that can run on a single node or multi-node kubernetes cluster)
+- cluster (the gateway process and container bridge that manage sandboxes on the local machine)
 - gateway (the control plane / server system that manages a cluster and sandboxes)
 - inference (access to models for agents and what they produce, includes privacy aware model routing)
 - sandbox (long-running agentic environments that are strictly controlled by security policies)

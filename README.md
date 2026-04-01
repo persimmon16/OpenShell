@@ -13,30 +13,23 @@ This is an active fork of [NVIDIA/OpenShell](https://github.com/NVIDIA/OpenShell
 
 OpenShell is the safe, private runtime for autonomous AI agents. It provides sandboxed execution environments that protect your data, credentials, and infrastructure — governed by declarative YAML policies that prevent unauthorized file access, data exfiltration, and uncontrolled network activity.
 
-> **Fork status: active development.** The Apple Container migration is in progress. Security hardening has landed across 8 merged PRs. This fork tracks upstream and periodically syncs.
+> **Fork status: Apple Container migration complete.** Docker and K3s/Kubernetes have been fully removed. The gateway runs as a native macOS process and sandboxes are Apple Container VMs. Security hardening has landed across 8 merged PRs. This fork tracks upstream and periodically syncs.
 
 ## Fork Development Status
 
-### Merged
-
 | Area | Branch | Summary |
 |------|--------|---------|
+| Runtime | `feat/apple-container` | Core Apple Container integration: native gateway, container bridge, SSH bootstrap |
 | Security | `security/secure-defaults` | Localhost bind, enforce mode, Apple Container backend |
 | Security | `security/ci-hardening` | Fix shell injection in GitHub Actions workflows |
 | Security | `security/pki-hardening` | Constrain CA, fail-hard secrets, 365-day cert TTL |
 | Security | `security/ssh-host-key` | SSH host key verification when gateway provides fingerprint |
 | Security | `security/gateway-auth` | Insecure-mode guard, cross-sandbox credential theft fix |
 | Security | `security/misc-hardening` | PID locking, forward-spec warning, non-root container |
-| Security | `security/dead-code-removal` | Remove Kubernetes/Docker dead code from config and server |
+| Security | `security/dead-code-removal` | Remove Docker/K3s dead code from config and server |
 | Security | `security/fix-ssh-host-key-verification` | Hostname format, tempfile dep, TempDir leak fixes |
 | CI | `ci/trigger-macos-e2e` | macOS e2e validation with Apple Container install |
 | CI | `fix/release-auto-tag-signing` | Sign auto-tags via GitHub API, handle missing seed tag |
-
-### In Progress
-
-| Area | Branch | Summary |
-|------|--------|---------|
-| Runtime | `feat/apple-container` | Core Apple Container integration (21 commits ahead) |
 | CI | `fix/ci-swift-bridge-dependency` | Clone Apple Container for Swift bridge build |
 
 ## Quickstart
@@ -67,7 +60,7 @@ Both methods install the latest stable release from upstream by default. To inst
 openshell sandbox create -- claude  # or opencode, codex, copilot
 ```
 
-A gateway is created automatically on first use. To deploy on a remote host instead, pass `--remote user@host` to the create command.
+A gateway is created automatically on first use.
 
 The sandbox container includes the following tools by default:
 
@@ -126,7 +119,7 @@ OpenShell isolates each sandbox in its own container with policy-enforced egress
 | **Policy Engine**  | Enforces filesystem, network, and process constraints from application layer down to kernel. |
 | **Privacy Router** | Privacy-aware LLM routing that keeps sensitive context on sandbox compute.                   |
 
-Under the hood, all these components run as a [K3s](https://k3s.io/) Kubernetes cluster inside a container — no separate K8s install required. On this fork, the container runtime is [Apple Container](https://github.com/apple/container) on macOS (replacing the upstream Docker dependency). The `openshell gateway` commands take care of provisioning the container and cluster.
+On this fork, the gateway runs as a native macOS process and each sandbox is an [Apple Container](https://github.com/apple/container) VM. A Swift-based container bridge translates gRPC sandbox lifecycle calls into Apple Container API operations. The `openshell gateway` commands manage the gateway process and container bridge daemon.
 
 ## Protection Layers
 
@@ -144,20 +137,6 @@ Policies are declarative YAML files. Static sections (filesystem, process) are l
 ## Providers
 
 Agents need credentials — API keys, tokens, service accounts. OpenShell manages these as **providers**: named credential bundles that are injected into sandboxes at creation. The CLI auto-discovers credentials for recognized agents (Claude, Codex, OpenCode, Copilot) from your shell environment, or you can create providers explicitly with `openshell provider create`. Credentials never leak into the sandbox filesystem; they are injected as environment variables at runtime.
-
-## GPU Support (Experimental)
-
-> **Experimental** — GPU passthrough works on supported hosts but is under active development. Expect rough edges and breaking changes.
-
-OpenShell can pass host GPUs into sandboxes for local inference, fine-tuning, or any GPU workload. Add `--gpu` when creating a sandbox:
-
-```bash
-openshell sandbox create --gpu --from [gpu-enabled-sandbox] -- claude
-```
-
-The CLI auto-bootstraps a GPU-enabled gateway on first use, auto-selecting CDI when available. GPU intent is also inferred automatically for community images with `gpu` in the name.
-
-**Requirements:** NVIDIA drivers and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) must be installed on the host. The sandbox image must include the appropriate GPU drivers and libraries for your workload — the default `base` image does not. See the [BYOC example](https://github.com/NVIDIA/OpenShell/tree/main/examples/bring-your-own-container) for building a custom sandbox image with GPU support.
 
 ## Supported Agents
 
@@ -188,7 +167,7 @@ See the full [CLI reference](https://github.com/NVIDIA/OpenShell/blob/main/docs/
 
 ## Terminal UI
 
-OpenShell includes a real-time terminal dashboard for monitoring gateways, sandboxes, and providers — inspired by [k9s](https://k9scli.io/).
+OpenShell includes a real-time terminal dashboard for monitoring gateways, sandboxes, and providers.
 
 ```bash
 openshell term
@@ -198,7 +177,7 @@ openshell term
   <img src="docs/assets/openshell-terminal.png" alt="OpenShell Terminal UI">
 </p>
 
-The TUI gives you a live, keyboard-driven view of your cluster. Navigate with `Tab` to switch panels, `j`/`k` to move through lists, `Enter` to select, and `:` for command mode. Cluster health and sandbox status auto-refresh every two seconds.
+The TUI gives you a live, keyboard-driven view of your gateways and sandboxes. Navigate with `Tab` to switch panels, `j`/`k` to move through lists, `Enter` to select, and `:` for command mode. Gateway health and sandbox status auto-refresh every two seconds.
 
 ## Community Sandboxes and BYOC
 
@@ -244,7 +223,8 @@ All implementation work is human-gated — agents propose plans, humans approve,
 | Sandbox | `crates/openshell-sandbox/` | Container supervision, policy-enforced egress routing |
 | Policy Engine | `crates/openshell-policy/` | Filesystem, network, process, and inference constraints |
 | Privacy Router | `crates/openshell-router/` | Privacy-aware LLM routing |
-| Bootstrap | `crates/openshell-bootstrap/` | Cluster setup, image loading, mTLS PKI |
+| Container Bridge | `container-bridge/` | Swift daemon bridging gRPC to Apple Container API |
+| Bootstrap | `crates/openshell-bootstrap/` | Gateway setup, Apple Container runtime, mTLS PKI |
 | Core | `crates/openshell-core/` | Shared types, configuration, error handling |
 | Providers | `crates/openshell-providers/` | Credential provider backends |
 | TUI | `crates/openshell-tui/` | Ratatui-based terminal dashboard |

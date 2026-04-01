@@ -40,7 +40,7 @@ These pipelines connect skills into end-to-end workflows. Individual skill files
 | `crates/openshell-tui/` | Terminal UI | Ratatui-based dashboard for monitoring |
 | `python/openshell/` | Python SDK | Python bindings and CLI packaging |
 | `proto/` | Protobuf definitions | gRPC service contracts |
-| `deploy/` | Containers, deployment config | Dockerfiles, deployment configuration |
+| `deploy/` | Deployment config | Containerfiles and deployment configuration |
 | `.agents/skills/` | Agent skills | Workflow automation for development |
 | `.agents/agents/` | Agent personas | Sub-agent definitions (e.g., reviewer, doc writer) |
 | `architecture/` | Architecture docs | Design decisions and component documentation |
