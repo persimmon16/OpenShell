@@ -43,7 +43,7 @@ jobs:
           rm container-installer.pkg
 
       - name: Verify Apple Container
-        run: container system info
+        run: container system version
 
       - name: Build CLI
         run: cargo build --release -p openshell-cli
