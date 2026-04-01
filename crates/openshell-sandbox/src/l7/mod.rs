@@ -47,9 +47,9 @@ pub enum TlsMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EnforcementMode {
     /// Log violations but allow traffic through (safe migration path).
-    #[default]
     Audit,
     /// Deny violations — blocked requests never reach upstream.
+    #[default]
     Enforce,
 }
 
@@ -106,8 +106,8 @@ pub fn parse_l7_config(val: &regorus::Value) -> Option<L7EndpointConfig> {
     };
 
     let enforcement = match get_object_str(val, "enforcement").as_deref() {
-        Some("enforce") => EnforcementMode::Enforce,
-        _ => EnforcementMode::Audit,
+        Some("audit") => EnforcementMode::Audit,
+        _ => EnforcementMode::Enforce,
     };
 
     Some(L7EndpointConfig {
@@ -396,7 +396,7 @@ mod tests {
         let config = parse_l7_config(&val).unwrap();
         assert_eq!(config.protocol, L7Protocol::Rest);
         assert_eq!(config.tls, TlsMode::Auto);
-        assert_eq!(config.enforcement, EnforcementMode::Audit);
+        assert_eq!(config.enforcement, EnforcementMode::Enforce);
     }
 
     #[test]

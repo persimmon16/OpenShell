@@ -18,7 +18,7 @@ use openshell_server::{run_server, tracing_bus::TracingLogBus};
 #[command(version = openshell_core::VERSION)]
 #[command(about = "OpenShell gRPC/HTTP server", long_about = None)]
 struct Args {
-    /// Port to bind the server to (all interfaces).
+    /// Port to bind the server to (localhost only by default).
     #[arg(long, default_value_t = 8080, env = "OPENSHELL_SERVER_PORT")]
     port: u16,
 
@@ -146,7 +146,7 @@ async fn main() -> Result<()> {
     );
 
     // Build configuration
-    let bind = SocketAddr::from(([0, 0, 0, 0], args.port));
+    let bind = SocketAddr::from(([127, 0, 0, 1], args.port));
 
     let tls = if args.disable_tls {
         None
