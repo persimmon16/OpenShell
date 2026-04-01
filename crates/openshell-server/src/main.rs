@@ -139,6 +139,15 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    // Require explicit acknowledgment for insecure mode.
+    if args.disable_tls && std::env::var("OPENSHELL_ALLOW_INSECURE").as_deref() != Ok("1") {
+        eprintln!(
+            "ERROR: --disable-tls removes all transport security.\n\
+             Set OPENSHELL_ALLOW_INSECURE=1 to confirm."
+        );
+        std::process::exit(1);
+    }
+
     // Initialize tracing
     let tracing_log_bus = TracingLogBus::new();
     tracing_log_bus.install_subscriber(
@@ -229,6 +238,7 @@ async fn main() -> Result<()> {
     }
 
     if args.disable_tls {
+        eprintln!("WARNING: TLS disabled — all traffic is plaintext");
         info!("TLS disabled — listening on plaintext HTTP");
     } else if args.disable_gateway_auth {
         info!("Gateway auth disabled — accepting connections without client certificates");
