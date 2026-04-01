@@ -2486,6 +2486,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "time",
  "tokio",
  "tracing",
 ]
@@ -2706,6 +2707,7 @@ dependencies = [
  "owo-colors",
  "ratatui",
  "serde",
+ "tempfile",
  "terminal-colorsaurus",
  "tokio",
  "tonic",
