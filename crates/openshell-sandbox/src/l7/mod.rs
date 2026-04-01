@@ -396,7 +396,7 @@ mod tests {
         let config = parse_l7_config(&val).unwrap();
         assert_eq!(config.protocol, L7Protocol::Rest);
         assert_eq!(config.tls, TlsMode::Auto);
-        assert_eq!(config.enforcement, EnforcementMode::Audit);
+        assert_eq!(config.enforcement, EnforcementMode::Enforce);
     }
 
     #[test]
