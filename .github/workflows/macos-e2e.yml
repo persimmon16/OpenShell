@@ -27,6 +27,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Swift 6.2
+        run: |
+          curl -O https://download.swift.org/swiftly/darwin/swiftly.pkg
+          installer -pkg swiftly.pkg -target CurrentUserHomeDirectory
+          ~/.swiftly/bin/swiftly init --quiet-shell-followup
+          . "${SWIFTLY_HOME_DIR:-$HOME/.swiftly}/env.sh"
+          swiftly install 6.2
+          echo "${SWIFTLY_HOME_DIR:-$HOME/.swiftly}/bin" >> "$GITHUB_PATH"
+          swift --version
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
