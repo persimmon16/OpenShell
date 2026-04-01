@@ -68,7 +68,7 @@ pub const MAX_PAGE_SIZE: u32 = 1000;
 // enough for legitimate payloads while capping resource-exhaustion vectors.
 // ---------------------------------------------------------------------------
 
-/// Maximum length for a sandbox or provider name (Kubernetes name limit).
+/// Maximum length for a sandbox or provider name.
 const MAX_NAME_LEN: usize = 253;
 
 /// Maximum number of providers that can be attached to a sandbox.
@@ -232,12 +232,10 @@ impl OpenShell for OpenShellService {
         } else {
             request.name.clone()
         };
-        let namespace = self.state.config.sandbox_namespace.clone();
-
         let sandbox = Sandbox {
             id: id.clone(),
             name: name.clone(),
-            namespace,
+            namespace: String::new(),
             spec: Some(spec),
             status: None,
             phase: SandboxPhase::Provisioning as i32,
@@ -434,7 +432,7 @@ impl OpenShell for OpenShellService {
             }
 
             // Replay buffered platform events (best-effort) so late subscribers
-            // see Kubernetes events (Scheduled, Pulling, etc.) that already fired.
+            // see provisioning events that already fired.
             if follow_events {
                 for evt in state
                     .tracing_log_bus
@@ -3449,14 +3447,10 @@ async fn resolve_sandbox_exec_target(
         return Err(Status::failed_precondition("sandbox has no name"));
     }
 
-    // Kubernetes DNS fallback.
-    Ok((
-        format!(
-            "{}.{}.svc.cluster.local",
-            sandbox.name, state.config.sandbox_namespace
-        ),
-        state.config.sandbox_ssh_port,
-    ))
+    Err(Status::internal(format!(
+        "sandbox backend returned no exec target for {}",
+        sandbox.name
+    )))
 }
 
 /// Maximum number of arguments in the command array.
@@ -3675,7 +3669,7 @@ async fn stream_exec_over_ssh(
     );
 
     // Retry loop: the sandbox SSH server may not be accepting connections yet
-    // even though the pod is marked Ready by Kubernetes. We retry transient
+    // even though the sandbox is marked ready. We retry transient
     // connection errors with exponential backoff.
     let (exit_code, proxy_task) = {
         let mut last_err: Option<Status> = None;
