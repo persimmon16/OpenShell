@@ -59,6 +59,7 @@ struct SshSessionConfig {
     sandbox_id: String,
     gateway_url: String,
     token: String,
+    host_key_fingerprint: String,
 }
 
 async fn ssh_session_config(
@@ -127,22 +128,51 @@ async fn ssh_session_config(
         sandbox_id: session.sandbox_id.clone(),
         gateway_url,
         token: session.token,
+        host_key_fingerprint: session.host_key_fingerprint,
     })
 }
 
-fn ssh_base_command(proxy_command: &str) -> Command {
+fn ssh_base_command(proxy_command: &str, host_key_fingerprint: &str) -> Command {
     let mut command = Command::new("ssh");
     command
         .arg("-o")
-        .arg(format!("ProxyCommand={proxy_command}"))
-        .arg("-o")
-        .arg("StrictHostKeyChecking=no")
-        .arg("-o")
-        .arg("UserKnownHostsFile=/dev/null")
-        .arg("-o")
-        .arg("GlobalKnownHostsFile=/dev/null")
-        .arg("-o")
-        .arg("LogLevel=ERROR");
+        .arg(format!("ProxyCommand={proxy_command}"));
+    if host_key_fingerprint.is_empty() {
+        command
+            .arg("-o")
+            .arg("StrictHostKeyChecking=no")
+            .arg("-o")
+            .arg("UserKnownHostsFile=/dev/null")
+            .arg("-o")
+            .arg("GlobalKnownHostsFile=/dev/null");
+    } else {
+        // Write a temporary known_hosts with the gateway-provided fingerprint
+        // and enable strict host key checking to detect MITM attacks.
+        let known_hosts = format!("[sandbox]:2222 {host_key_fingerprint}");
+        let applied = (|| -> Option<()> {
+            let dir = tempfile::tempdir().ok()?;
+            let path = dir.into_path().join("known_hosts");
+            std::fs::write(&path, &known_hosts).ok()?;
+            command
+                .arg("-o")
+                .arg("StrictHostKeyChecking=yes")
+                .arg("-o")
+                .arg(format!("UserKnownHostsFile={}", path.display()))
+                .arg("-o")
+                .arg("GlobalKnownHostsFile=/dev/null");
+            Some(())
+        })();
+        if applied.is_none() {
+            command
+                .arg("-o")
+                .arg("StrictHostKeyChecking=no")
+                .arg("-o")
+                .arg("UserKnownHostsFile=/dev/null")
+                .arg("-o")
+                .arg("GlobalKnownHostsFile=/dev/null");
+        }
+    }
+    command.arg("-o").arg("LogLevel=ERROR");
     command
 }
 
@@ -236,7 +266,7 @@ async fn sandbox_connect_with_mode(
 ) -> Result<()> {
     let session = ssh_session_config(server, name, tls).await?;
 
-    let mut command = ssh_base_command(&session.proxy_command);
+    let mut command = ssh_base_command(&session.proxy_command, &session.host_key_fingerprint);
     command
         .arg("-tt")
         .arg("-o")
@@ -315,7 +345,7 @@ pub async fn sandbox_forward(
 
     let session = ssh_session_config(server, name, tls).await?;
 
-    let mut command = TokioCommand::from(ssh_base_command(&session.proxy_command));
+    let mut command = TokioCommand::from(ssh_base_command(&session.proxy_command, &session.host_key_fingerprint));
     command
         .arg("-N")
         .arg("-o")
@@ -395,7 +425,7 @@ async fn sandbox_exec_with_mode(
     }
 
     let session = ssh_session_config(server, name, tls).await?;
-    let mut ssh = ssh_base_command(&session.proxy_command);
+    let mut ssh = ssh_base_command(&session.proxy_command, &session.host_key_fingerprint);
 
     if tty {
         ssh.arg("-tt")
@@ -465,7 +495,7 @@ pub async fn sandbox_sync_up_files(
 
     let session = ssh_session_config(server, name, tls).await?;
 
-    let mut ssh = ssh_base_command(&session.proxy_command);
+    let mut ssh = ssh_base_command(&session.proxy_command, &session.host_key_fingerprint);
     ssh.arg("-T")
         .arg("-o")
         .arg("RequestTTY=no")
@@ -534,7 +564,7 @@ pub async fn sandbox_sync_up(
 ) -> Result<()> {
     let session = ssh_session_config(server, name, tls).await?;
 
-    let mut ssh = ssh_base_command(&session.proxy_command);
+    let mut ssh = ssh_base_command(&session.proxy_command, &session.host_key_fingerprint);
     ssh.arg("-T")
         .arg("-o")
         .arg("RequestTTY=no")
@@ -627,7 +657,7 @@ pub async fn sandbox_sync_down(
         ),
     );
 
-    let mut ssh = ssh_base_command(&session.proxy_command);
+    let mut ssh = ssh_base_command(&session.proxy_command, &session.host_key_fingerprint);
     ssh.arg("-T")
         .arg("-o")
         .arg("RequestTTY=no")

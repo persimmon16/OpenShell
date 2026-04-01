@@ -26,6 +26,7 @@ miette = { workspace = true }
 owo-colors = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
+tempfile = "3"
 url = { workspace = true }
 
 [lints]
