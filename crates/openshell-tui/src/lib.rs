@@ -778,6 +778,44 @@ async fn fetch_sandbox_detail(app: &mut App) {
 // Shell connect (suspend TUI, launch SSH, resume)
 // ---------------------------------------------------------------------------
 
+/// Apply SSH host key verification arguments to an SSH command.
+///
+/// When the gateway provides a host key fingerprint, a temporary `known_hosts` file
+/// is written and strict checking is enabled. Otherwise, host key checking is
+/// disabled (current behavior until the gateway populates the fingerprint field).
+fn apply_host_key_args(cmd: &mut std::process::Command, host_key_fingerprint: &str) {
+    if host_key_fingerprint.is_empty() {
+        cmd.arg("-o")
+            .arg("StrictHostKeyChecking=no")
+            .arg("-o")
+            .arg("UserKnownHostsFile=/dev/null")
+            .arg("-o")
+            .arg("GlobalKnownHostsFile=/dev/null");
+    } else {
+        let known_hosts = format!("[sandbox]:2222 {host_key_fingerprint}");
+        let applied = (|| -> Option<()> {
+            let dir = tempfile::tempdir().ok()?;
+            let path = dir.into_path().join("known_hosts");
+            std::fs::write(&path, &known_hosts).ok()?;
+            cmd.arg("-o")
+                .arg("StrictHostKeyChecking=yes")
+                .arg("-o")
+                .arg(format!("UserKnownHostsFile={}", path.display()))
+                .arg("-o")
+                .arg("GlobalKnownHostsFile=/dev/null");
+            Some(())
+        })();
+        if applied.is_none() {
+            cmd.arg("-o")
+                .arg("StrictHostKeyChecking=no")
+                .arg("-o")
+                .arg("UserKnownHostsFile=/dev/null")
+                .arg("-o")
+                .arg("GlobalKnownHostsFile=/dev/null");
+        }
+    }
+}
+
 /// Suspend the TUI, launch an interactive SSH shell to the sandbox, resume on exit.
 ///
 /// This replicates the `openshell sandbox connect` flow but uses `Command::status()`
@@ -863,13 +901,9 @@ async fn handle_shell_connect(
     let mut command = std::process::Command::new("ssh");
     command
         .arg("-o")
-        .arg(format!("ProxyCommand={proxy_command}"))
-        .arg("-o")
-        .arg("StrictHostKeyChecking=no")
-        .arg("-o")
-        .arg("UserKnownHostsFile=/dev/null")
-        .arg("-o")
-        .arg("GlobalKnownHostsFile=/dev/null")
+        .arg(format!("ProxyCommand={proxy_command}"));
+    apply_host_key_args(&mut command, &session.host_key_fingerprint);
+    command
         .arg("-o")
         .arg("LogLevel=ERROR")
         .arg("-tt")
@@ -1012,14 +1046,9 @@ async fn handle_exec_command(
         .join(" ");
     let mut ssh = std::process::Command::new("ssh");
     ssh.arg("-o")
-        .arg(format!("ProxyCommand={proxy_command}"))
-        .arg("-o")
-        .arg("StrictHostKeyChecking=no")
-        .arg("-o")
-        .arg("UserKnownHostsFile=/dev/null")
-        .arg("-o")
-        .arg("GlobalKnownHostsFile=/dev/null")
-        .arg("-o")
+        .arg(format!("ProxyCommand={proxy_command}"));
+    apply_host_key_args(&mut ssh, &session.host_key_fingerprint);
+    ssh.arg("-o")
         .arg("LogLevel=ERROR")
         .arg("-tt")
         .arg("-o")
@@ -1434,13 +1463,9 @@ async fn start_port_forwards(
         let mut command = std::process::Command::new("ssh");
         command
             .arg("-o")
-            .arg(format!("ProxyCommand={proxy_command}"))
-            .arg("-o")
-            .arg("StrictHostKeyChecking=no")
-            .arg("-o")
-            .arg("UserKnownHostsFile=/dev/null")
-            .arg("-o")
-            .arg("GlobalKnownHostsFile=/dev/null")
+            .arg(format!("ProxyCommand={proxy_command}"));
+        apply_host_key_args(&mut command, &session.host_key_fingerprint);
+        command
             .arg("-o")
             .arg("LogLevel=ERROR")
             .arg("-o")
