@@ -24,23 +24,11 @@ pub struct Config {
     /// Database URL for persistence.
     pub database_url: String,
 
-    /// Kubernetes namespace for sandboxes.
-    #[serde(default = "default_sandbox_namespace")]
-    pub sandbox_namespace: String,
-
     /// Default container image for sandboxes.
     #[serde(default)]
     pub sandbox_image: String,
 
-    /// Kubernetes `imagePullPolicy` for sandbox pods (e.g. `Always`,
-    /// `IfNotPresent`, `Never`).  Defaults to empty, which lets Kubernetes
-    /// apply its own default (`:latest` → `Always`, anything else →
-    /// `IfNotPresent`).
-    #[serde(default)]
-    pub sandbox_image_pull_policy: String,
-
     /// gRPC endpoint for sandboxes to connect back to OpenShell.
-    /// Used by sandbox pods to fetch their policy at startup.
     #[serde(default)]
     pub grpc_endpoint: String,
 
@@ -72,23 +60,7 @@ pub struct Config {
     #[serde(default = "default_ssh_session_ttl_secs")]
     pub ssh_session_ttl_secs: u64,
 
-    /// Kubernetes secret name containing client TLS materials for sandbox pods.
-    /// When set, sandbox pods get this secret mounted so they can connect to
-    /// the server over mTLS.
-    #[serde(default)]
-    pub client_tls_secret_name: String,
-
-    /// Host gateway IP for sandbox pod hostAliases.
-    /// When set, sandbox pods get hostAliases entries mapping
-    /// `host.docker.internal` and `host.openshell.internal` to this IP,
-    /// allowing them to reach services running on the Docker host.
-    #[serde(default)]
-    pub host_gateway_ip: String,
-
-    /// Sandbox backend: `"kubernetes"` (default) or `"apple-container"`.
-    ///
-    /// When set to `"apple-container"`, the server manages sandboxes via
-    /// the container bridge daemon instead of the Kubernetes API.
+    /// Sandbox backend (e.g. `"apple-container"`).
     #[serde(default = "default_sandbox_backend")]
     pub sandbox_backend: String,
 
@@ -159,9 +131,7 @@ impl Config {
             log_level: default_log_level(),
             tls,
             database_url: String::new(),
-            sandbox_namespace: default_sandbox_namespace(),
             sandbox_image: String::new(),
-            sandbox_image_pull_policy: String::new(),
             grpc_endpoint: String::new(),
             ssh_gateway_host: default_ssh_gateway_host(),
             ssh_gateway_port: default_ssh_gateway_port(),
@@ -170,8 +140,6 @@ impl Config {
             ssh_handshake_secret: String::new(),
             ssh_handshake_skew_secs: default_ssh_handshake_skew_secs(),
             ssh_session_ttl_secs: default_ssh_session_ttl_secs(),
-            client_tls_secret_name: String::new(),
-            host_gateway_ip: String::new(),
             sandbox_backend: default_sandbox_backend(),
             bridge_endpoint: String::new(),
             bridge_tls: None,
@@ -199,24 +167,10 @@ impl Config {
         self
     }
 
-    /// Create a new configuration with a sandbox namespace.
-    #[must_use]
-    pub fn with_sandbox_namespace(mut self, namespace: impl Into<String>) -> Self {
-        self.sandbox_namespace = namespace.into();
-        self
-    }
-
     /// Create a new configuration with a default sandbox image.
     #[must_use]
     pub fn with_sandbox_image(mut self, image: impl Into<String>) -> Self {
         self.sandbox_image = image.into();
-        self
-    }
-
-    /// Create a new configuration with a sandbox image pull policy.
-    #[must_use]
-    pub fn with_sandbox_image_pull_policy(mut self, policy: impl Into<String>) -> Self {
-        self.sandbox_image_pull_policy = policy.into();
         self
     }
 
@@ -276,21 +230,7 @@ impl Config {
         self
     }
 
-    /// Set the Kubernetes secret name for sandbox client TLS materials.
-    #[must_use]
-    pub fn with_client_tls_secret_name(mut self, name: impl Into<String>) -> Self {
-        self.client_tls_secret_name = name.into();
-        self
-    }
-
-    /// Set the host gateway IP for sandbox pod hostAliases.
-    #[must_use]
-    pub fn with_host_gateway_ip(mut self, ip: impl Into<String>) -> Self {
-        self.host_gateway_ip = ip.into();
-        self
-    }
-
-    /// Set the sandbox backend (`"kubernetes"` or `"apple-container"`).
+    /// Set the sandbox backend.
     #[must_use]
     pub fn with_sandbox_backend(mut self, backend: impl Into<String>) -> Self {
         self.sandbox_backend = backend.into();
@@ -320,10 +260,6 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
-fn default_sandbox_namespace() -> String {
-    "default".to_string()
-}
-
 fn default_ssh_gateway_host() -> String {
     "127.0.0.1".to_string()
 }
@@ -349,5 +285,5 @@ const fn default_ssh_session_ttl_secs() -> u64 {
 }
 
 fn default_sandbox_backend() -> String {
-    "kubernetes".to_string()
+    "apple-container".to_string()
 }

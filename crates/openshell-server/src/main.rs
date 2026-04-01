@@ -42,20 +42,11 @@ struct Args {
     #[arg(long, env = "OPENSHELL_DB_URL", required = true)]
     db_url: String,
 
-    /// Kubernetes namespace for sandboxes.
-    #[arg(long, env = "OPENSHELL_SANDBOX_NAMESPACE", default_value = "default")]
-    sandbox_namespace: String,
-
     /// Default container image for sandboxes.
     #[arg(long, env = "OPENSHELL_SANDBOX_IMAGE")]
     sandbox_image: Option<String>,
 
-    /// Kubernetes imagePullPolicy for sandbox pods (Always, IfNotPresent, Never).
-    #[arg(long, env = "OPENSHELL_SANDBOX_IMAGE_PULL_POLICY")]
-    sandbox_image_pull_policy: Option<String>,
-
-    /// gRPC endpoint for sandboxes to callback to `OpenShell`.
-    /// This should be reachable from within the Kubernetes cluster.
+    /// gRPC endpoint for sandboxes to connect back to the gateway.
     #[arg(long, env = "OPENSHELL_GRPC_ENDPOINT")]
     grpc_endpoint: Option<String>,
 
@@ -86,16 +77,6 @@ struct Args {
     /// Allowed clock skew in seconds for SSH handshake.
     #[arg(long, env = "OPENSHELL_SSH_HANDSHAKE_SKEW_SECS", default_value_t = 300)]
     ssh_handshake_skew_secs: u64,
-
-    /// Kubernetes secret name containing client TLS materials for sandbox pods.
-    #[arg(long, env = "OPENSHELL_CLIENT_TLS_SECRET_NAME")]
-    client_tls_secret_name: Option<String>,
-
-    /// Host gateway IP for sandbox pod hostAliases.
-    /// When set, sandbox pods get hostAliases entries mapping
-    /// host.docker.internal and host.openshell.internal to this IP.
-    #[arg(long, env = "OPENSHELL_HOST_GATEWAY_IP")]
-    host_gateway_ip: Option<String>,
 
     /// Disable TLS entirely — listen on plaintext HTTP.
     /// Use this when the gateway sits behind a reverse proxy or tunnel
@@ -178,7 +159,6 @@ async fn main() -> Result<()> {
 
     config = config
         .with_database_url(args.db_url)
-        .with_sandbox_namespace(args.sandbox_namespace)
         .with_ssh_gateway_host(args.ssh_gateway_host)
         .with_ssh_gateway_port(args.ssh_gateway_port)
         .with_ssh_connect_path(args.ssh_connect_path)
@@ -189,24 +169,12 @@ async fn main() -> Result<()> {
         config = config.with_sandbox_image(image);
     }
 
-    if let Some(policy) = args.sandbox_image_pull_policy {
-        config = config.with_sandbox_image_pull_policy(policy);
-    }
-
     if let Some(endpoint) = args.grpc_endpoint {
         config = config.with_grpc_endpoint(endpoint);
     }
 
     if let Some(secret) = args.ssh_handshake_secret {
         config = config.with_ssh_handshake_secret(secret);
-    }
-
-    if let Some(name) = args.client_tls_secret_name {
-        config = config.with_client_tls_secret_name(name);
-    }
-
-    if let Some(ip) = args.host_gateway_ip {
-        config = config.with_host_gateway_ip(ip);
     }
 
     config = config.with_sandbox_backend(&args.sandbox_backend);
